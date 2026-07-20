@@ -32,25 +32,7 @@ divergence handling) rather than just RTL implementation.
 
 ## Architecture (high level)
 
-```
-CPU (PS, Zynq)
-  │  AXI-Stream / AXI-Lite (CSR)
-Command FIFO
-  │
-Triangle Setup
-  │
-Tile Binner
-  │
-Tile Buffer (BRAM)
-  │
-Rasterizer
-  │
-Fragment Generator
-  │
-[Shader Core: scalar → SIMD → SIMT, phases 2–4]
-  │
-Framebuffer
-```
+![Architecture](docs/architecture.png)
 
 ## Verification
 
