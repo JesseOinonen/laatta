@@ -1,0 +1,572 @@
+%==============================================================================
+%  Laatta — Architecture Specification
+%  Build:  pdflatex documentation.tex   (run twice for the table of contents)
+%==============================================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage[a4paper,margin=25mm,headheight=15pt]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{fancyhdr}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage[hidelinks]{hyperref}
+
+%------------------------------------------------------------------ metadata --
+\newcommand{\docTitle}{Laatta --- Tile-Based GPU Architecture Specification}
+\newcommand{\docID}{LAATTA-ARCH-001}
+\newcommand{\docVersion}{0.2}
+\newcommand{\docStatus}{Draft}
+\newcommand{\docDate}{2026-07-21}
+\newcommand{\docAuthor}{Jesse Oinonen}
+
+%----------------------------------------------------------- page furniture ---
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\docID}
+\fancyhead[R]{\small Version \docVersion\ --- \docStatus}
+\fancyfoot[L]{\small Laatta Architecture Specification}
+\fancyfoot[R]{\small Page \thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0.4pt}
+
+\captionsetup{font=small,labelfont=bf}
+\setlength{\parskip}{0.6em}
+\setlength{\parindent}{0pt}
+
+% Decision / assumption / question records: full text width, no narrow columns.
+\newcommand{\field}[1]{\textbf{#1}\quad}
+\newlist{records}{description}{1}
+\setlist[records]{leftmargin=0pt,style=nextline,font=\bfseries,itemsep=0.8em}
+
+\begin{document}
+
+%================================================================ title page ==
+\begin{titlepage}
+\centering
+\vspace*{2cm}
+
+{\Huge\bfseries Laatta\par}
+\vspace{0.6cm}
+{\LARGE Tile-Based Deferred Rendering GPU\par}
+\vspace{0.3cm}
+{\Large Architecture Specification\par}
+
+\vspace{2.5cm}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+Document ID   & \docID \\
+Version       & \docVersion \\
+Status        & \docStatus \\
+Date          & \docDate \\
+Author        & \docAuthor \\
+Target device & Digilent Arty Z7, Xilinx Zynq-7000 XC7Z020 \\
+\bottomrule
+\end{tabular}
+
+\vspace{2.5cm}
+
+\begin{minipage}{0.85\textwidth}
+\small
+\textbf{Abstract.}\quad
+This document specifies the architecture of Laatta, a small tile-based deferred
+rendering (TBDR) GPU implemented from scratch on FPGA. It records the
+architectural decisions taken for the fixed-function pipeline together with the
+measurements from the Phase~0 golden model that justify them.
+\end{minipage}
+
+\vfill
+{\small Source of record: \texttt{docs/documentation.tex}}
+\end{titlepage}
+
+%========================================================== revision history ==
+\section*{Revision history}
+\addcontentsline{toc}{section}{Revision history}
+
+\begin{tabularx}{\textwidth}{@{}llXl@{}}
+\toprule
+\textbf{Version} & \textbf{Date} & \textbf{Description} & \textbf{Author} \\
+\midrule
+0.1 & 2026-07-20 & Initial architecture outline: TBDR pipeline structure,
+                   pixel formats, target platform. & \docAuthor \\
+0.2 & 2026-07-21 & Phase~0 golden model complete. Architecture diagram updated
+                   with tile buffer, tile scheduler and separate index fetch. &
+                   \docAuthor \\
+\bottomrule
+\end{tabularx}
+
+\newpage
+\tableofcontents
+\newpage
+\listoffigures
+\newpage
+
+%==============================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Laatta is a small tile-based GPU IP implemented from scratch on FPGA, targeting
+the Digilent Arty Z7 (Zynq-7000 XC7Z020). It follows the architectural
+philosophy of mobile GPUs such as ARM Mali and Imagination PowerVR: tile-based
+deferred rendering (TBDR).
+
+The primary purpose of the project is to learn GPU architecture by building one
+--- specifically, to understand the reasoning behind the structure of a modern
+mobile GPU rather than only its implementation. The design targets low-power 2D
+and light 3D rendering for embedded user interfaces such as automotive cluster
+displays, industrial HMI panels and wearables, at 480p and 720p.
+
+\subsection{How it works}
+
+The frame is rendered in two passes. The \emph{geometry pass} transforms, clips
+and culls all triangles, then bins them into small screen-space tiles, writing
+the result to a parameter buffer in DRAM. The \emph{per-tile pass} then renders
+one tile at a time, keeping that tile's colour and depth entirely in on-chip
+BRAM for the whole time the tile is being processed. Only the finished colour is
+written back to DRAM.
+
+The consequence is that the depth buffer never reaches DRAM at all, and the
+colour buffer is written exactly once, in burst-aligned blocks.
+
+\subsection{The trade-off}
+
+Tiling is not free. It replaces depth and colour traffic with a parameter buffer
+that must be written once and read back once per tile the triangle touches, and
+it adds a full frame of latency, since binning must complete before any tile can
+be rasterised.
+
+The balance therefore depends on the workload: \textbf{TBDR wins on pixels and
+loses on geometry}. Measurements from the Phase~0 golden model put the saving at
+22--48\,\% of total DRAM traffic compared with an immediate-mode renderer
+producing pixel-identical output. For the embedded UI workload targeted here the
+pixel side dominates, and tiling is clearly the right choice.
+
+\subsection{Learning objective and what follows from it}
+
+Data movement, not arithmetic, dominates cost in modern SoC and accelerator
+design. A TBDR GPU makes that trade-off unusually concrete: tile size, on-chip
+buffer budget, binning strategy and cache sizing all trade silicon area against
+DRAM bandwidth, and each of them can be quantified before a line of RTL exists.
+That is the reason this architecture was chosen as the vehicle for learning.
+
+Several decisions in this document follow from that objective rather than from
+product requirements:
+
+\begin{itemize}[leftmargin=1.4em,itemsep=0.3em]
+\item \textbf{Built from scratch} rather than integrating an existing GPU IP
+      core. The point is the internal structure, so there is nothing to be
+      gained by treating the pipeline as a black box.
+\item \textbf{Implemented in phases}, each introducing one concept:
+      fixed-function pipeline, then a scalar shader core, then SIMD lanes, then
+      SIMT with warps, active-lane masks and divergence handling. Each phase is
+      a working design, not a step towards one.
+\item \textbf{A golden model precedes the RTL.} It exists to answer architecture
+      questions with numbers, and doubles as the pixel-accurate verification
+      reference. Every sizing decision in this document is traceable to one of
+      its measurements.
+\item \textbf{A deliberately modest FPGA target.} A constrained device forces
+      real trade-offs; a larger one would allow decisions to be avoided rather
+      than made.
+\item \textbf{Simplifications are accepted where they do not affect the
+      architectural lesson}, for example screen-space linear interpolation
+      instead of perspective-correct, and bounding-box binning instead of exact
+      edge tests. Each such simplification is stated explicitly where it occurs.
+\end{itemize}
+
+\subsection{Scope of this document}
+
+This document covers the fixed-function pipeline: vertex transform, clipping and
+culling, binning, tile buffer, rasterisation, depth test and blending.
+Texturing, programmable shading, SIMD and SIMT execution are planned for later
+phases and are out of scope here.
+
+\subsection{Document conventions}
+
+\begin{itemize}[leftmargin=1.4em,itemsep=0.2em]
+\item Architectural decisions are recorded as numbered records
+      \textbf{D-\textit{nn}}, each stating the decision, its rationale, the
+      evidence supporting it and the blocks it affects.
+\item Assumptions not yet verified against hardware are recorded as
+      \textbf{A-\textit{nn}}. An assumption that turns out to be wrong
+      invalidates every decision that cites it.
+\item Open questions are recorded as \textbf{Q-\textit{nn}}.
+\item Measurements quoted in the text always name the scene, resolution and
+      configuration they were taken under.
+\end{itemize}
+
+%==============================================================================
+\section{Architecture}
+\label{sec:architecture}
+
+Figure~\ref{fig:architecture} shows the pipeline, organised by the memory each
+stage works against: programmable logic (FABRIC), on-chip block RAM (BRAM) and
+external memory (DRAM). The geometry pass runs once per frame and ends by
+writing the parameter buffer to DRAM; the per-tile pass then repeats for every
+tile, reading that buffer back and keeping colour and depth on chip.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{architecture.png}
+\caption{Laatta pipeline.}
+\label{fig:architecture}
+\end{figure}
+
+%==============================================================================
+\section{Terminology}
+\label{sec:terminology}
+
+% TODO
+
+%==============================================================================
+\section{System context}
+\label{sec:context}
+
+% TODO
+
+%==============================================================================
+\section{Design decisions}
+\label{sec:decisions}
+
+Only decisions supported by Phase~0 measurements are recorded here. Remaining
+decisions are added as they are taken, and existing ones are revisited when the
+open assumptions of Section~\ref{sec:assumptions} are resolved.
+
+\subsection{D-01 \quad Pixel formats}
+\field{Decision.} Colour is RGBA8 (4\,B per pixel); depth is unsigned 16-bit
+(2\,B per pixel), giving 6\,B per pixel of tile buffer.
+
+\field{Rationale.} % TODO
+
+\field{Affects.} Tile buffer sizing (D-02), tile flush, blending, framebuffer
+layout.
+
+\field{Status.} Accepted.
+
+\subsection{D-02 \quad Tile size $32\times32$ pixels}
+\field{Decision.} Tiles are $32\times32$ pixels. The tile buffer is therefore
+$32\times32\times6\,\mathrm{B}=6144\,\mathrm{B}$ of BRAM.
+
+\field{Rationale.} Tiles of $8\times8$ are disqualified outright: an 8-pixel row
+is 32\,B against a 64\,B burst, so every row of the tile flush wastes half a
+burst and total colour write traffic doubles. This gives a hard lower bound of
+$\text{burst}/\text{bytes per pixel}=16$ pixels of tile width. Above 16 the
+traffic returns are small --- 32 saves 2.9\,\% over 16, and 64 a further
+1.3\,\% --- but $32\times32$ reduces the tile count from 3600 to 920 at 720p,
+giving four times fewer pipeline drain and refill events at tile boundaries, a
+cost the traffic model does not capture but which is real in RTL. At 6\,KB out
+of roughly 630\,KB of BRAM on the XC7Z020 the on-chip cost is negligible.
+
+\field{Evidence.} Table~\ref{tab:tile-sweep}; \texttt{model/output/sweep.csv},
+\texttt{seal.obj} at $1280\times720$.
+
+\field{Affects.} Tile buffer, binner, tile scheduler, tile flush, rasteriser.
+
+\field{Status.} Accepted, conditional on A-01.
+
+\subsection{D-03 \quad Post-transform vertex cache: 32 entries, FIFO}
+\field{Decision.} A 32-entry post-transform vertex cache with FIFO replacement,
+holding shaded vertices keyed by vertex index. Approximately 512\,B, in
+distributed RAM rather than BRAM.
+
+\field{Rationale.} Measured over the real index stream rather than assumed.
+Without a cache, geometry traffic is 8.83\,MB; with 32 entries it is 2.31\,MB,
+and 1.47\,MB once the asset pipeline of D-04 is applied. LRU was measured
+alongside FIFO and differs by less than 0.2\,\% at every size, so the cheaper
+replacement policy is chosen. Returns flatten sharply beyond 32 entries.
+
+\field{Evidence.} Table~\ref{tab:vcache};
+\texttt{model/output/vertex\_cache.csv}, \texttt{seal.obj}.
+
+\field{Affects.} Vertex fetch, vertex shading throughput.
+
+\field{Status.} Accepted.
+
+\subsection{D-04 \quad Asset pipeline: triangle reorder and vertex renumbering}
+\field{Decision.} Geometry is preprocessed on the host before upload: triangles
+reordered for vertex-cache locality, then vertices renumbered into first-use
+order and the vertex buffer permuted to match. This is a functional requirement
+of the system, not an optimisation.
+
+\field{Rationale.} Exporters emit triangles in modelling order, which caches
+poorly. Applying both passes reduces geometry traffic by 37\,\% and vertex
+shader invocations by 20\,\% at no hardware cost. A 32-entry cache on optimised
+data (1.47\,MB) outperforms a 256-entry cache on unoptimised data (1.56\,MB) at
+an eighth of the storage. Both passes are required together: reordering
+triangles alone \emph{increased} DRAM bytes, because it scatters vertex fetch
+addresses and destroys burst locality, and the renumbering pass restores it.
+
+\field{Evidence.} Table~\ref{tab:vcache}, optimised columns.
+
+\field{Affects.} Host driver, vertex fetch.
+
+\field{Status.} Accepted.
+
+\subsection{D-05 \quad Parameter buffer stores screen vertices, not edge
+coefficients}
+\field{Decision.} Each triangle occupies 40\,B in the parameter buffer: three
+screen-space vertices of 12\,B each plus a 4\,B header. Tile lists hold a 4\,B
+triangle index per entry with an 8\,B header per tile. Full edge-function setup
+is performed in the rasteriser, per tile.
+
+\field{Rationale.} The alternative --- performing setup before binning and
+storing the coefficients --- makes each record larger, and the parameter buffer
+is read once per tile the triangle touches. Since the average triangle touches
+only 1.16 tiles at $32\times32$, almost no setup work is repeated, so the
+smaller record wins clearly.
+
+\field{Evidence.} Binning fan-out and parameter traffic in
+Table~\ref{tab:tile-sweep}.
+
+\field{Affects.} Binner, tile scheduler, rasteriser, parameter buffer layout.
+
+\field{Status.} Accepted.
+
+\subsection{D-06 \quad Bounding-box binning}
+\field{Decision.} A triangle is added to every tile its screen-space bounding
+box overlaps, with no exact edge test.
+
+\field{Rationale.} Exact binning would remove some false positives, but at
+$32\times32$ the average triangle already touches only 1.16 tiles, leaving
+little to recover. The comparison logic would cost more than the parameter
+traffic it saves.
+
+\field{Evidence.} Table~\ref{tab:tile-sweep}, tiles-per-triangle column.
+
+\field{Affects.} Binner.
+
+\field{Status.} Accepted.
+
+\subsection{D-07 \quad Rasterisation precision: 1/16 pixel, integer edge
+functions}
+\field{Decision.} Screen coordinates are snapped to a 1/16-pixel grid (4
+fractional bits). Edge functions are exact 64-bit integer arithmetic. The fill
+rule is top-left.
+
+\field{Rationale.} Integer edge functions make coverage deterministic and
+exactly reproducible between the golden model and the RTL, which is what makes
+pixel-exact verification possible at all. The top-left rule ensures a pixel on
+a shared edge is drawn by exactly one of the two triangles.
+
+\field{Evidence.} Implemented in
+\texttt{model/src/render/raster\_impl.h}; the tiled and immediate-mode paths
+produce pixel-identical output on both test scenes.
+
+\field{Affects.} Rasteriser, verification.
+
+\field{Status.} Accepted.
+
+\subsection{D-08 \quad Screen-space linear interpolation}
+\field{Decision.} Vertex attributes are interpolated linearly in screen space
+(affine), not perspective-correct.
+
+\field{Rationale.} Simplification accepted for Phase~1. With Gouraud shading the
+error is not visible, and it keeps the whole interpolation path in integer
+arithmetic. Perspective-correct interpolation requires a per-pixel reciprocal
+and becomes mandatory when texturing is added; it is therefore scheduled with
+the texturing phase.
+
+\field{Evidence.} Simplification, not a measurement. Recorded so it is not
+mistaken for an oversight.
+
+\field{Affects.} Rasteriser; revisited in Phase~3.
+
+\field{Status.} Accepted for Phase~1.
+
+\subsection{D-09 \quad Tile scheduler skips empty tiles}
+\field{Decision.} Tiles with no triangles are not processed; their framebuffer
+region is written with the clear colour without loading or rasterising
+anything.
+
+\field{Rationale.} On \texttt{seal.obj} at $640\times480$, 1063 of 1200 tiles
+are empty (89\,\%). Skipping them is a basic function of the scheduler, not an
+optimisation to be deferred.
+
+\field{Evidence.} Golden model binning statistics, \texttt{seal.obj} at
+$640\times480$.
+
+\field{Affects.} Tile scheduler.
+
+\field{Status.} Accepted.
+
+%==============================================================================
+\section{Micro-architecture}
+\label{sec:uarch}
+
+Blocks to be implemented in RTL for Phase~1. Each entry is completed as the
+block is designed, stating its interfaces, internal state, latency, throughput
+and resource usage.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Block} & \textbf{Status} & \textbf{Decisions} \\
+\midrule
+Index fetch            & Not started & --- \\
+Vertex fetch / shading & Not started & D-03, D-04 \\
+Clipping / culling     & Not started & --- \\
+Binner                 & Not started & D-05, D-06 \\
+Tile scheduler         & Not started & D-02, D-09 \\
+Rasteriser             & Not started & D-05, D-07, D-08 \\
+HSR / depth test       & Not started & D-01 \\
+Blending               & Not started & D-01 \\
+Tile buffer            & Not started & D-01, D-02 \\
+Tile flush             & Not started & D-01, D-02 \\
+\bottomrule
+\end{tabular}
+\caption{Phase~1 block implementation status.}
+\label{tab:blocks}
+\end{table}
+
+\subsection{Tile FIFO sizing}
+% TODO
+
+%==============================================================================
+\section{Memory map and data formats}
+\label{sec:memmap}
+
+% TODO: generate from model/src/memory/memory_map.h
+
+%==============================================================================
+\section{Verification}
+\label{sec:verification}
+
+% TODO
+
+%==============================================================================
+\section{Assumptions and open issues}
+\label{sec:assumptions}
+
+\subsection{Assumptions}
+
+An assumption that turns out to be wrong invalidates every decision that cites
+it.
+
+\begin{records}
+\item[A-01 --- DRAM burst granularity is 64\,B]
+Not verified against the Zynq PS DDR controller configuration. This assumption
+has wider consequences than any other in the document: it sets the minimum tile
+width. \emph{Affects:} D-02, and every traffic figure quoted.
+
+\item[A-02 --- 16-bit depth is sufficient for the target content]
+\emph{Affects:} D-01.
+
+\item[A-03 --- The host performs the geometry preprocessing of D-04]
+If it does not, geometry traffic rises by roughly 57\,\%. \emph{Affects:} D-03,
+D-04.
+
+\item[A-04 --- A single clock domain is sufficient for Phase~1]
+\emph{Affects:} all blocks.
+\end{records}
+
+\subsection{Open questions}
+
+\begin{records}
+\item[Q-01 --- What is the real DRAM burst size and achievable bandwidth?]
+Resolves A-01.
+% TODO
+
+\item[Q-02 --- How should the tile FIFO behave when a tile list exceeds its
+capacity?]
+On \texttt{seal.obj} at $640\times480$ with $32\times32$ tiles the average tile
+list holds 94 triangles and the worst holds 4686, a spread of roughly 50 times.
+The worst-case list is 187\,kB of parameter data and cannot be held on chip.
+% TODO
+
+\item[Q-03 --- How should the HSR unit be sized?]
+Measured overdraw is only 1.15 on both test scenes, which are single opaque
+objects and therefore not representative of a workload where HSR pays for
+itself.
+% TODO
+
+\item[Q-04 --- How is the parameter buffer allocated and bounded?]
+Its size depends on scene complexity, which is not known in advance.
+% TODO
+
+\item[Q-05 --- Is the framebuffer double-buffered, and what is the memory
+budget?]
+% TODO
+\end{records}
+
+\subsection{Known limitations of the current measurements}
+
+The two test scenes are single opaque objects with overdraw of 1.15, no
+transparency, no textures and one draw call. They are representative of the
+geometry and fill balance of simple embedded UI content, but not of a workload
+with significant depth complexity. Decisions D-02 and D-03 should be re-examined
+against a scene with higher overdraw before they are considered final.
+
+%==============================================================================
+\section{Roadmap}
+\label{sec:roadmap}
+
+% TODO
+
+%==============================================================================
+\appendix
+\section{Measurement data}
+\label{app:data}
+
+Produced by the Phase~0 golden model. Reproduce with
+\texttt{make sweep SCENE=testdata/seal.obj} in \texttt{model/}.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{@{}rrrrrrr@{}}
+\toprule
+\textbf{Tile} & \textbf{Tiles} & \textbf{BRAM} & \textbf{Entries} &
+\textbf{Tiles/tri} & \textbf{Param rd} & \textbf{Total DRAM} \\
+\midrule
+8   & 14\,400 & 384     & 46\,283 & 1.77 & 2\,151\,680 & 13\,856\,832 \\
+16  & 3\,600  & 1\,536  & 35\,251 & 1.34 & 1\,579\,904 & 9\,468\,160 \\
+32  & 920     & 6\,144  & 30\,492 & 1.16 & 1\,349\,056 & 9\,196\,800 \\
+64  & 240     & 24\,576 & 28\,228 & 1.08 & 1\,243\,968 & 9\,077\,248 \\
+128 & 60      & 98\,304 & 27\,191 & 1.04 & 1\,196\,928 & 9\,024\,640 \\
+\bottomrule
+\end{tabular}
+\caption{Tile size sweep. \texttt{seal.obj} at $1280\times720$, 32-entry vertex
+cache, all byte figures burst-rounded. Immediate mode for the same scene:
+15\,019\,584\,B.}
+\label{tab:tile-sweep}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+& \multicolumn{2}{c}{\textbf{Exporter order}} &
+  \multicolumn{2}{c}{\textbf{Optimised (D-04)}} & \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+\textbf{Entries} & \textbf{Hit} & \textbf{DRAM B} &
+\textbf{Hit} & \textbf{DRAM B} & \textbf{Transforms} \\
+\midrule
+0     & 0.0\,\%   & 8\,834\,560 & 0.0\,\%   & 8\,865\,344 & 167\,652 \\
+8     & 65.5\,\%  & 2\,733\,632 & 59.1\,\%  & 3\,600\,384 & 68\,569 \\
+16    & 66.2\,\%  & 2\,656\,832 & 67.3\,\%  & 2\,483\,712 & 54\,757 \\
+32    & 68.8\,\%  & 2\,312\,832 & 75.0\,\%  & 1\,466\,816 & 41\,884 \\
+64    & 69.4\,\%  & 2\,232\,064 & 75.8\,\%  & 1\,354\,880 & 40\,516 \\
+256   & 74.1\,\%  & 1\,562\,304 & 76.2\,\%  & 1\,306\,176 & 39\,940 \\
+\midrule
+ideal & 100\,\%   & 1\,255\,360 & 100\,\%   & 1\,255\,360 & 39\,230 \\
+\bottomrule
+\end{tabular}
+\caption{Vertex cache measurement. \texttt{seal.obj}, 167\,652 indices, 39\,230
+unique vertices, FIFO replacement. Transforms column is for the optimised
+order. LRU differed from FIFO by less than 0.2\,\% at every size.}
+\label{tab:vcache}
+\end{table}
+
+%==============================================================================
+\section*{References}
+\addcontentsline{toc}{section}{References}
+
+% TODO
+
+\end{document}
