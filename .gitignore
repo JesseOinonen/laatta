@@ -3,3 +3,18 @@ docs/documentation.md
 # Phase 0 model
 model/build/
 model/output/
+
+# Block-level xsim build (scripts/sim_geometry_fetch.sh)
+ip/sim/build/
+
+# Vivado xsim tool droppings (if run outside ip/sim/build)
+xsim.dir/
+.Xil/
+*.jou
+*.pb
+*.wdb
+xvhdl.log
+xvlog.log
+xelab.log
+xsim.log
+webtalk*

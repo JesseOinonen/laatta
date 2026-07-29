@@ -59,17 +59,31 @@ architecture RTL of geometry_fetch is
     signal desc         : draw_descriptor_t;
     signal vertex_data  : std_logic_vector(255 downto 0);
     signal vertex_valid : std_logic;
+    signal vertex_last  : std_logic;
+
+    signal ar_capt      : std_logic;
     
     signal clk          : std_logic;
     signal ce           : std_logic;
 begin
 
-    ce <= start or busy;
+    process(clk_in, rst_n)
+    begin
+        if rst_n = '0' then
+            busy <= '0';
+        elsif rising_edge(clk_in) then
+            if start = '1' then
+                busy <= '1';
+            elsif vertex_last = '1' then
+                busy <= '0';
+            end if;
+        end if;
+    end process;
 
     cg_inst : entity work.cg
         port map (
             clk     => clk_in,
-            en      => ce,
+            en      => busy,
             clk_out => clk
         );
 
@@ -82,17 +96,18 @@ begin
             index        <= (others => '0');
             vertex_data  <= (others => '0');
             vertex_valid <= '0';
+            vertex_last  <= '0';
         elsif rising_edge(clk) then
             rdata_int <= (others => '0');
             if rresp /= RESP_OKAY then
                 rdata_err <= '1';
             elsif rvalid = '1' and rready = '1' then
-                vertex_valid <= '0';
+                vertex_last <= '0';
                 case data_state is
                     when DESCR =>
                         beat_idx <= beat_idx + 1;
                         if rlast = '1' then
-                            desc     <= unpack_descriptor(beats(0), beats(1), beats(2), beats(3));
+                            desc     <= unpack_descriptor(beats(0), beats(1), beats(2), rdata);
                             beat_idx <= 0;
                         else
                             beats(beat_idx) <= rdata;
@@ -100,11 +115,13 @@ begin
                     when IDX =>
                         index <= rdata(31 downto 0);
                     when VERTEX =>
+                        vertex_valid <= '0';
                         beat_idx <= beat_idx + 1;
                         if rlast = '1' then
-                            vertex_data  <= beats(3) & beats(2) & beats(1) & beats(0);
+                            vertex_data  <= rdata & beats(2) & beats(1) & beats(0);
                             vertex_valid <= '1';
                             beat_idx     <= 0;
+                            vertex_last  <= '1' when idx_cntr = desc.index_count-1;
                         else
                             beats(beat_idx) <= rdata;
                         end if;
@@ -126,6 +143,7 @@ begin
             arburst    <= (others => '0');
             arlen      <= (others => '0');
             arstate    <= IDLE;
+            ar_capt    <= '0';
             data_state <= IDLE;
             rready     <= '0';
             idx_cntr   <= (others => '0');
@@ -134,46 +152,61 @@ begin
             case arstate is
                 when DESCR =>
                     araddr  <= std_logic_vector(CMD_BASE); -- Base address for descriptor
-                    arvalid <= '1';
+                    if ar_capt = '0' then
+                        arvalid <= '1';
+                        ar_capt <= '1';
+                    end if;
                     arsize  <= AXSIZE_8B; -- 64-bit beat size
                     arburst <= AXBURST_INCR; -- Incrementing burst
                     arlen   <= std_logic_vector(to_unsigned(DESC_BEATS - 1, 8)); -- Number of beats for descriptor
                     if arready = '1' then -- Next address once the current one is accepted
-                        arstate <= IDX;
                         arvalid <= '0';
+                    end if;
+                    if rlast = '1' then -- Move to next address after the data has been recieved for the next address
+                        arstate <= IDX;
+                        ar_capt <= '0';
                     end if;
                 when IDX =>
                     araddr   <= std_logic_vector(desc.ib_base + idx_cntr * 4);
                     arlen    <= (others => '0'); -- Single beat for index buffer
                     arsize   <= AXSIZE_4B; -- 32-bit beat size
                     arburst  <= AXBURST_INCR; -- Incrementing burst
-                    arvalid  <= '1';
-                    idx_cntr <= idx_cntr + 1;
+                    if ar_capt = '0' then
+                        arvalid <= '1';
+                        ar_capt <= '1';
+                    end if;
                     if arready = '1' then -- Next address once the current one is accepted
-                        arstate <= VERTEX;
                         arvalid <= '0';
+                    end if;
+                    if rlast = '1' then -- Move to next address after the data has been recieved for the next address
+                        arstate <= VERTEX;
+                        ar_capt <= '0';
                     end if;
                 when VERTEX =>
                     araddr <= std_logic_vector(resize(desc.vb_base + unsigned(index) * desc.vertex_stride, C_AXI_ADDR_W));
                     arlen  <= std_logic_vector(to_unsigned(VERTEX_BEATS - 1, 8)); -- Number of beats for vertex buffer
                     arsize <= AXSIZE_8B; -- 64-bit beat size
                     arburst <= AXBURST_INCR; -- Incrementing burst
-                    arvalid <= '1';
+                    if ar_capt = '0' then
+                        arvalid <= '1';
+                        ar_capt <= '1';
+                    end if;
                     if arready = '1' then -- Next address once the current one is accepted
-                        if rlast = '1' and (idx_cntr = desc.index_count - 1) then
-                            arvalid <= '0';
-                            arstate <= IDLE;
-                        else
-                            arvalid <= '0';
-                            arstate <= IDX;
-                        end if;
+                        arvalid <= '0';
+                    end if;
+                    if rlast = '1' and (idx_cntr = desc.index_count - 1) then
+                        arstate  <= IDLE;
+                        idx_cntr <= (others => '0');
+                        arvalid <= '0';
+                    elsif rlast = '1' then
+                        arstate <= IDX;
+                        idx_cntr <= idx_cntr + 1;
+                        arvalid <= '0';
                     end if;
                 when others => -- IDLE
                     rready <= '0';
-                    busy   <= '0';
-                    if start = '1' then
+                    if busy = '1' then
                         arstate <= DESCR;
-                        busy    <= '1';
                         rready  <= '1';
                     end if;
             end case;      
@@ -187,14 +220,15 @@ begin
             tvalid <= '0';
             tlast  <= '0';
         elsif rising_edge(clk) then
-            tvalid <= '0';
             if vertex_valid = '1' then
                 tdata  <= vertex_data;
                 tvalid <= '1';
-                tlast  <= '0';
-                if idx_cntr = desc.index_count - 1 then
-                    tlast  <= '1';
-                end if;
+                tlast  <= vertex_last;
+            else 
+                tvalid <= '0';
+            end if;
+            if tvalid = '1' and tready = '1' then
+                tvalid <= '0';
             end if;
         end if;
     end process axi_stream;

@@ -79,6 +79,17 @@ logic [7:0]  tkeep_out;
 logic        tlast_out;
 logic        tready_out;
 
+// ---------------------------------------------------------------------------
+// 4. Block bring-up (geometry_fetch): direct start + 256-bit vertex stream.
+//    The full-GPU fabric above is 64-bit; a single block emits whole 256-bit
+//    vertices, so it gets its own wider stream here until the shader consumes it.
+// ---------------------------------------------------------------------------
+logic         start;       // start pulse into the block
+logic [255:0] v_tdata;     // one 32 B vertex per beat
+logic         v_tvalid;
+logic         v_tready;
+logic         v_tlast;
+
 // ===========================================================================
 // AXI4-Lite master BFM tasks
 // ===========================================================================
