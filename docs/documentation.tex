@@ -524,6 +524,20 @@ the earlier \texttt{rdone} handoff. A non-\texttt{OKAY} \texttt{RRESP} raises an
 error flag. Only one transaction is outstanding, so no \texttt{ARID}/\texttt{RID}
 are needed; they are omitted until pipelining is added.
 
+\field{Assembly and output granularity.} Read beats are consumed as they arrive,
+each written into its slot of an assembly register --- the sequencer never
+idles waiting. Data is forwarded downstream one complete unit at a time, not per
+beat and not buffered until the run ends: a vertex (four 64-bit beats = one
+256-bit record) is streamed out on the AXI4-Stream port the moment its fourth
+beat lands, so the vertex shader transforms vertex $i$ while geometry fetch is
+still fetching vertex $i{+}1$. An index arrives whole in one beat and is used
+immediately to form the next vertex address; the descriptor's four beats are
+assembled before \texttt{unpack\_descriptor}. Nothing waits for DONE ---
+DONE only marks that the last of \texttt{index\_count} vertices has been emitted.
+An index counter, incremented once per index/vertex pair and compared against
+\texttt{index\_count}, ends the loop; the transition to IDLE is gated on the
+final \texttt{RLAST} so the last burst is never cut short.
+
 \field{Start / done handshake.} \texttt{start} is a single-cycle pulse from the
 control register, not a held level. Capturing the pulse sets an internal
 \texttt{busy} flag that stays high for the whole run and clears at DONE; a new

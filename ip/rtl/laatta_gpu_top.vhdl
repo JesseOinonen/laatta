@@ -32,7 +32,11 @@ entity laatta_gpu_top is
 end laatta_gpu_top;
 
 architecture RTL of laatta_gpu_top is
-    signal rst_n : std_logic;
+    signal rst_n  : std_logic;
+    signal tdata  : std_logic_vector(C_AXIS_DATA_W-1 downto 0);
+    signal tvalid : std_logic;
+    signal tready : std_logic;
+    signal tlast  : std_logic;
 begin
 
     rst_n_sync_inst : entity work.rst_n_sync
@@ -58,6 +62,10 @@ begin
             rready      => rready,
             rlast       => rlast,
             rresp       => rresp,
+            tdata       => tdata,
+            tvalid      => tvalid,
+            tready      => tready,
+            tlast       => tlast,
             start       => start
         );
 
