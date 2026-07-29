@@ -45,7 +45,7 @@ begin
 
     geometry_fetch_inst : entity work.geometry_fetch
         port map (
-            clk         => clk,
+            clk_in      => clk,
             rst_n       => rst_n,
             araddr      => araddr,
             arvalid     => arvalid,
