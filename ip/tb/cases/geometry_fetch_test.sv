@@ -50,6 +50,17 @@ class geometry_fetch_vseq extends gpu_vseq_base;
         logic         got_last [$];
         int           n;
 
+        // Observed AXI4 read address channel (one entry per accepted AR).
+        logic [31:0]  ar_addr [$];
+        logic [7:0]   ar_len  [$];
+        logic [2:0]   ar_size [$];
+
+        // Expected AR sequence, built below.
+        logic [31:0]  exp_addr [$];
+        logic [7:0]   exp_len  [$];
+        logic [2:0]   exp_size [$];
+        string        exp_what [$];
+
         #20ns;
 
         // --- Backdoor-preload DRAM (memory_map.h layout) ---
@@ -67,6 +78,18 @@ class geometry_fetch_vseq extends gpu_vseq_base;
         for (int j = 0; j < N_VTX; j++)
             for (int b = 0; b < 4; b++)
                 dram.poke_word(`MMAP_VB_BASE + j*32 + b*8, vbeat(j, b));
+
+        // --- Record every accepted read address (runs for the whole test) ---
+        fork
+            forever begin
+                @(posedge axi_vif.clk);
+                if (axi_vif.dram_arvalid && axi_vif.dram_arready) begin
+                    ar_addr.push_back(axi_vif.dram_araddr);
+                    ar_len.push_back(axi_vif.dram_arlen);
+                    ar_size.push_back(axi_vif.dram_arsize);
+                end
+            end
+        join_none
 
         // --- Pulse start ---
         axi_vif.start = 0;
@@ -118,7 +141,42 @@ class geometry_fetch_vseq extends gpu_vseq_base;
             end
         end
 
-        #200ns;
+        // --- Check the AXI read address sequence ---
+        // The DUT must read: the descriptor at CMD_BASE, then for each index
+        // its 4-byte index word, then the 4-beat vertex it points at. This is
+        // where a broken descriptor unpack or address calculation shows up
+        // directly, rather than only as a wrong output vertex.
+        #200ns;   // let any trailing reads land
+
+        exp_addr.push_back(`MMAP_CMD_BASE); exp_len.push_back(8'd3);
+        exp_size.push_back(3'd3);           exp_what.push_back("draw descriptor");
+        for (int k = 0; k < N_IDX; k++) begin
+            exp_addr.push_back(`MMAP_IB_BASE + k*4);        exp_len.push_back(8'd0);
+            exp_size.push_back(3'd2);
+            exp_what.push_back($sformatf("index %0d", k));
+            exp_addr.push_back(`MMAP_VB_BASE + idx_of(k)*32); exp_len.push_back(8'd3);
+            exp_size.push_back(3'd3);
+            exp_what.push_back($sformatf("vertex for index %0d (vb[%0d])", k, idx_of(k)));
+        end
+
+        if (ar_addr.size() != exp_addr.size())
+            `uvm_error("GF", $sformatf("read count = %0d, expected %0d",
+                                       ar_addr.size(), exp_addr.size()))
+
+        for (int i = 0; i < exp_addr.size(); i++) begin
+            if (i >= ar_addr.size()) begin
+                `uvm_error("GF", $sformatf("read %0d (%s) never issued: expected addr 0x%08h",
+                                           i, exp_what[i], exp_addr[i]))
+            end else begin
+                if (ar_addr[i] !== exp_addr[i])
+                    `uvm_error("GF", $sformatf("read %0d (%s): address 0x%08h, expected 0x%08h",
+                                               i, exp_what[i], ar_addr[i], exp_addr[i]))
+                if (ar_len[i] !== exp_len[i] || ar_size[i] !== exp_size[i])
+                    `uvm_error("GF", $sformatf(
+                        "read %0d (%s): len=%0d size=%0d, expected len=%0d size=%0d",
+                        i, exp_what[i], ar_len[i], ar_size[i], exp_len[i], exp_size[i]))
+            end
+        end
     endtask
 
 endclass
