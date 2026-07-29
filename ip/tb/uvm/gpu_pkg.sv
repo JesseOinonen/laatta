@@ -42,5 +42,6 @@ package gpu_pkg;
     `include "csr_test.sv"
     `include "stream_test.sv"
     `include "dram_read_test.sv"
+    `include "axi4_read_test.sv"
     `include "datapath_test.sv"
 endpackage

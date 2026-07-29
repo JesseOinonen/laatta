@@ -393,6 +393,40 @@ $640\times480$.
 
 \field{Status.} Accepted.
 
+\subsection{D-10 \quad Reset strategy: active-low, asynchronous assert,
+synchronous de-assert}
+\field{Decision.} The whole design uses a single active-low reset
+(\texttt{rst\_n}) that is asserted asynchronously and de-asserted synchronously.
+The raw reset is passed through a reset synchronizer (\texttt{rst\_n\_sync}, one
+per clock domain, at the top level); every register uses the synchronized reset
+in an asynchronous-reset process. This is the reset convention of an ASIC, not
+the one an FPGA would choose on its own.
+
+\field{Rationale.} The FPGA build is a prototype of an ASIC, so the RTL is kept
+byte-for-byte identical to what would be taped out --- the prototype has value
+only if it exercises the same logic. An ASIC uses asynchronous assert (reset
+must take effect before the clock is running, at power-up) with synchronous
+de-assert (releasing reset near a clock edge would otherwise let registers leave
+reset on different cycles, or go metastable). Active-low matches the AXI
+convention already in use (\texttt{ARESETN}). An FPGA left to its own preference
+would use a synchronous, active-high reset instead, which packs and times
+better.
+
+\field{Trade-off.} The asynchronous reset costs FPGA quality-of-results: it
+constrains how the tools pack registers and prevents the use of primitives that
+lack an asynchronous reset (some SRL and block-RAM configurations), and the
+high-fanout reset net must be placed on a global buffer. This is accepted
+deliberately --- QoR of the prototype is secondary to keeping the RTL identical
+to the ASIC target. Were the FPGA the product rather than a prototype, the
+decision would reverse.
+
+\field{Evidence.} Engineering convention, not a measurement.
+
+\field{Affects.} Every sequential block; top-level reset distribution;
+\texttt{rst\_n\_sync}.
+
+\field{Status.} Accepted. (Synchronizer implementation under bring-up.)
+
 %==============================================================================
 \section{Micro-architecture}
 \label{sec:uarch}
@@ -407,8 +441,9 @@ and resource usage.
 \toprule
 \textbf{Block} & \textbf{Status} & \textbf{Decisions} \\
 \midrule
-Index fetch            & Not started & --- \\
-Vertex fetch / shading & Not started & D-03, D-04 \\
+Geometry fetch         & In progress & D-03, D-04 \\
+\quad Index fetch      & In progress & --- \\
+\quad Vertex fetch / shading & In progress & D-03, D-04 \\
 Clipping / culling     & Not started & --- \\
 Binner                 & Not started & D-05, D-06 \\
 Tile scheduler         & Not started & D-02, D-09 \\
@@ -425,6 +460,75 @@ Tile flush             & Not started & D-01, D-02 \\
 
 Each block below follows the same template, so that the blocks can be compared
 and so that nothing is left unspecified by accident.
+
+\subsection{Geometry fetch}
+\field{Function.} Reads the draw descriptor from the command base
+(Section~\ref{sec:memmap}), then walks the index buffer and fetches the vertex
+each index points at, emitting vertices on the output stream. The index fetch
+and vertex fetch stages below are internal processes of this one RTL module:
+they share a single AXI4 read port and are coupled by back-pressure, so they
+are not separate modules.
+
+\field{Interfaces.} AXI4 read-only master to DRAM (\texttt{AR}/\texttt{R}
+channels only; no write channels); AXI4-Stream master carrying 256-bit vertices
+to the vertex shader; control signals \texttt{start}, \texttt{desc\_addr},
+\texttt{busy}, \texttt{done}. Scene dimensions are not ports --- they are read
+from the descriptor (Table~\ref{tab:descriptor-beats}).
+
+\field{Internal state.} Descriptor registers; current index counter; vertex
+assembly register (four 64-bit beats into one 256-bit vertex).
+
+\field{Latency and throughput.} % TODO
+
+\field{Resources.} % TODO
+
+\field{Related decisions.} D-03, D-04 (post-transform cache placement is open;
+the baseline implementation has no cache).
+
+\field{Status.} In progress (baseline: descriptor read plus uncached fetch).
+
+\subsection{Geometry fetch: read engine, sequencer and clock gating}
+
+\field{Read engine.} A generic AXI4 read FSM (\texttt{axi4\_read}) handles the
+\texttt{AR}/\texttt{R} handshake for one burst at a time. It is reused unchanged
+for all three read types (descriptor, index, vertex): the sequencer presents an
+address, length, size and burst type with a valid strobe, and the engine drives
+the address channel, streams the read beats, and raises a single-cycle
+\texttt{rdone} pulse on the last beat (\texttt{RLAST}) or on an error response.
+An accepted read address cannot be altered mid-burst, so the engine always runs
+a transaction to completion before returning to idle; \texttt{rdone} is the
+handoff that tells the sequencer new address values may be presented. Only one
+transaction is outstanding at a time --- \texttt{ARID}/\texttt{RID} are wired
+but unused, deferred until measurement shows read latency to be a bottleneck.
+
+\field{Sequencer.} A separate process, on the ungated clock, decides the order
+of reads --- descriptor first, then the index/vertex loop --- and generates
+each address. It hardcodes only the command base (\texttt{CMD\_BASE}); every
+other address comes from the unpacked descriptor. It advances only while the
+read engine is idle, so it never changes the engine's inputs mid-transaction.
+
+\field{Clock gating.} The read engine's clock is gated by a latch-based
+integrated clock-gating cell (\texttt{cg}), enabled by \texttt{axi\_active}.
+This leaves the engine unclocked while the GPU has not been started --- the
+legitimate coarse-grained use of clock gating, at block level rather than per
+register. \texttt{axi\_active} is derived from the held \texttt{start} level
+from the control register and is sampled only while the engine is in its IDLE
+state, so the gate enable can change only at a transaction boundary. It can
+therefore never gate off mid-burst, which would freeze the AXI handshake and
+deadlock the bus. This relies on \texttt{start} being a held level, not a pulse;
+the assumption must be preserved if the control interface changes.
+
+\field{Idle behaviour.} In IDLE the engine forces only the handshake qualifiers
+\texttt{ARVALID} and \texttt{RREADY} to 0. The address-channel payload
+(\texttt{ARADDR}, \texttt{ARLEN}, \texttt{ARSIZE}, \texttt{ARBURST}) is left at
+its last value, since AXI treats it as don't-care while \texttt{ARVALID} is low.
+Resetting it is unnecessary: clock gating freezes registers at their last
+defined value rather than randomising them, and the asynchronous reset (D-10)
+initialises them, so there is no stale-data hazard when the gated clock
+restarts.
+
+\field{Status.} Read engine, sequencer and clock gate in bring-up; index and
+vertex address generation and vertex assembly in progress.
 
 \subsection{Index fetch}
 \field{Function.} % TODO
@@ -464,7 +568,82 @@ D-04 (host-side index order the cache depends on).
 \section{Memory map and data formats}
 \label{sec:memmap}
 
-% TODO: generate from model/src/memory/memory_map.h
+The address map and buffer formats are defined by
+\texttt{model/src/memory/memory\_map.h}, which is the single source of truth
+and should be used to generate the RTL address constants. The tables below are
+reproduced from it and must not be edited independently.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Region} & \textbf{Base} & \textbf{Contents} \\
+\midrule
+Command       & \texttt{0x0000\_0000} & Draw descriptor, 32\,B \\
+Vertex buffer & \texttt{0x0010\_0000} & 32\,B per vertex \\
+Index buffer  & \texttt{0x0080\_0000} & 32-bit indices, triangle list \\
+Texture       & \texttt{0x0100\_0000} & Reserved; unused in Phase~1 \\
+Parameter     & \texttt{0x0200\_0000} & Transformed triangles and tile lists \\
+Framebuffer   & \texttt{0x0300\_0000} & RGBA8, row-major \\
+\bottomrule
+\end{tabular}
+\caption{DRAM address map.}
+\label{tab:memmap}
+\end{table}
+
+\subsection{Vertex format}
+
+32\,B per vertex, chosen so that exactly two vertices fit in one 64\,B DRAM
+burst: position (3 floats), normal (3 floats), texture coordinate (2 floats).
+
+\subsection{Draw descriptor}
+
+A 32\,B structure at the command base. The pipeline reads all scene dimensions
+from it rather than from registers, so a new scene requires no RTL or register
+change --- only a different descriptor in DRAM.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{@{}rll@{}}
+\toprule
+\textbf{Offset} & \textbf{Field} & \textbf{Meaning} \\
+\midrule
+0  & \texttt{magic}         & \texttt{0x4C41\_4154} (``LAAT''); validates the descriptor \\
+4  & \texttt{vertex\_count} & Number of vertices in the vertex buffer \\
+8  & \texttt{index\_count}  & Number of indices; a multiple of three \\
+12 & \texttt{vb\_base}      & Vertex buffer base address \\
+16 & \texttt{ib\_base}      & Index buffer base address \\
+20 & \texttt{vertex\_stride}& Bytes per vertex (32) \\
+24 & \texttt{tex\_base}     & Texture base; 0 = no texture (Phase~1) \\
+28 & \texttt{flags}         & Reserved \\
+\bottomrule
+\end{tabular}
+\caption{Draw descriptor fields.}
+\label{tab:descriptor}
+\end{table}
+
+\paragraph{Bit layout on a 64-bit bus.}
+The descriptor is read as a single four-beat burst (\texttt{ARLEN}~=~3) from the
+command base. On a 64-bit data bus each beat carries two fields: the field at
+the lower offset appears on \texttt{RDATA[31:0]} and the next on
+\texttt{RDATA[63:32]}. A block reading the descriptor unpacks the four beats as
+follows.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{@{}cll@{}}
+\toprule
+\textbf{Beat} & \textbf{\texttt{RDATA[31:0]}} & \textbf{\texttt{RDATA[63:32]}} \\
+\midrule
+0 & \texttt{magic}       & \texttt{vertex\_count} \\
+1 & \texttt{index\_count}& \texttt{vb\_base} \\
+2 & \texttt{ib\_base}    & \texttt{vertex\_stride} \\
+3 & \texttt{tex\_base}   & \texttt{flags} \\
+\bottomrule
+\end{tabular}
+\caption{Draw descriptor packing across the four beats of a 64-bit read burst.}
+\label{tab:descriptor-beats}
+\end{table}
 
 %==============================================================================
 \section{Verification}
