@@ -471,8 +471,9 @@ are not separate modules.
 
 \field{Interfaces.} AXI4 read-only master to DRAM (\texttt{AR}/\texttt{R}
 channels only; no write channels); AXI4-Stream master carrying 256-bit vertices
-to the vertex shader; control signals \texttt{start}, \texttt{desc\_addr},
-\texttt{busy}, \texttt{done}. Scene dimensions are not ports --- they are read
+to the vertex shader; a \texttt{start} pulse to launch a run and
+\texttt{busy}/\texttt{done} status. The descriptor address is fixed at
+\texttt{CMD\_BASE}, so it is not a port; all other scene dimensions are read
 from the descriptor (Table~\ref{tab:descriptor-beats}).
 
 \field{Internal state.} Descriptor registers; current index counter; vertex
@@ -487,48 +488,74 @@ the baseline implementation has no cache).
 
 \field{Status.} In progress (baseline: descriptor read plus uncached fetch).
 
-\subsection{Geometry fetch: read engine, sequencer and clock gating}
+\subsection{Geometry fetch: sequencer, AXI read channels and clock gating}
 
-\field{Read engine.} A generic AXI4 read FSM (\texttt{axi4\_read}) handles the
-\texttt{AR}/\texttt{R} handshake for one burst at a time. It is reused unchanged
-for all three read types (descriptor, index, vertex): the sequencer presents an
-address, length, size and burst type with a valid strobe, and the engine drives
-the address channel, streams the read beats, and raises a single-cycle
-\texttt{rdone} pulse on the last beat (\texttt{RLAST}) or on an error response.
-An accepted read address cannot be altered mid-burst, so the engine always runs
-a transaction to completion before returning to idle; \texttt{rdone} is the
-handoff that tells the sequencer new address values may be presented. Only one
-transaction is outstanding at a time --- \texttt{ARID}/\texttt{RID} are wired
-but unused, deferred until measurement shows read latency to be a bottleneck.
+The AXI4 read handling lives inside this module rather than in a separate
+\texttt{axi4\_read} block: the sequencer, the address channel and the data
+channel are coupled tightly enough (shared read port, one sequencing FSM) that
+splitting them added interface without value. The module is organised as one
+sequencing FSM plus two channel processes.
 
-\field{Sequencer.} A separate process, on the ungated clock, decides the order
-of reads --- descriptor first, then the index/vertex loop --- and generates
-each address. It hardcodes only the command base (\texttt{CMD\_BASE}); every
-other address comes from the unpacked descriptor. It advances only while the
-read engine is idle, so it never changes the engine's inputs mid-transaction.
+\field{Sequencer FSM.} One FSM decides which address is issued and in what
+order: descriptor first (at \texttt{CMD\_BASE}), then the index/vertex loop, an
+index counter deciding when the loop ends. This FSM is the only place the read
+order is defined. In the baseline it keeps a single transaction outstanding and
+advances only once the current read has completed, so it never alters an
+in-flight request. Multiple-outstanding pipelining --- index fetch running
+ahead of vertex fetch through a FIFO --- is deferred; the index-to-vertex
+address dependency means it cannot be a simple rotation and is a later
+restructuring, taken only if measurement shows read latency dominates.
 
-\field{Clock gating.} The read engine's clock is gated by a latch-based
-integrated clock-gating cell (\texttt{cg}), enabled by \texttt{axi\_active}.
-This leaves the engine unclocked while the GPU has not been started --- the
-legitimate coarse-grained use of clock gating, at block level rather than per
-register. \texttt{axi\_active} is derived from the held \texttt{start} level
-from the control register and is sampled only while the engine is in its IDLE
-state, so the gate enable can change only at a transaction boundary. It can
-therefore never gate off mid-burst, which would freeze the AXI handshake and
-deadlock the bus. This relies on \texttt{start} being a held level, not a pulse;
-the assumption must be preserved if the control interface changes.
+\field{Address channel.} \texttt{ARVALID} and the address payload
+(\texttt{ARADDR}, \texttt{ARLEN}, \texttt{ARSIZE}, \texttt{ARBURST}) are asserted
+together as soon as an address is ready --- \texttt{ARVALID} does not wait for
+\texttt{ARREADY}, per the AXI rule --- and held stable until \texttt{ARREADY} is
+seen. The address is what the slave latches at the handshake, so it must be
+valid throughout the valid phase, not loaded at completion. Only after the
+handshake is the next address presented, or \texttt{ARVALID} dropped if there is
+none. All bursts are \texttt{INCR}; descriptor and vertex are four beats
+(\texttt{ARLEN}=3, \texttt{ARSIZE}=8\,B), an index is one beat.
 
-\field{Idle behaviour.} In IDLE the engine forces only the handshake qualifiers
-\texttt{ARVALID} and \texttt{RREADY} to 0. The address-channel payload
-(\texttt{ARADDR}, \texttt{ARLEN}, \texttt{ARSIZE}, \texttt{ARBURST}) is left at
-its last value, since AXI treats it as don't-care while \texttt{ARVALID} is low.
-Resetting it is unnecessary: clock gating freezes registers at their last
-defined value rather than randomising them, and the asynchronous reset (D-10)
-initialises them, so there is no stale-data hazard when the gated clock
-restarts.
+\field{Data channel.} \texttt{RREADY} is held asserted for the duration of a
+read, so every beat is accepted as it arrives; a beat is captured when
+\texttt{RVALID} and \texttt{RREADY} are both high. \texttt{RLAST} marks the last
+beat and is what tells the sequencer the transaction is complete --- it replaces
+the earlier \texttt{rdone} handoff. A non-\texttt{OKAY} \texttt{RRESP} raises an
+error flag. Only one transaction is outstanding, so no \texttt{ARID}/\texttt{RID}
+are needed; they are omitted until pipelining is added.
 
-\field{Status.} Read engine, sequencer and clock gate in bring-up; index and
-vertex address generation and vertex assembly in progress.
+\field{Start / done handshake.} \texttt{start} is a single-cycle pulse from the
+control register, not a held level. Capturing the pulse sets an internal
+\texttt{busy} flag that stays high for the whole run and clears at DONE; a new
+frame is launched by writing \texttt{start} again after the scene in DRAM has
+been updated, which the module picks up because it re-reads the descriptor from
+DRAM every run. A pulse arriving while \texttt{busy} is high is ignored in the
+baseline; software checks \texttt{done}/\texttt{busy} before re-launching.
+\texttt{busy} and \texttt{done} are exposed through the status register.
+
+\field{Clock gating.} \texttt{busy} is also the enable for the block's clock
+gate (a latch-based cell, \texttt{cg}): the read logic is unclocked until a
+\texttt{start} pulse is captured and again once DONE clears \texttt{busy}. This
+is coarse block-level gating on the active window, the legitimate use of clock
+gating. The pulse capture and \texttt{busy} flag sit in the always-on (ungated)
+domain, so the wake condition can be observed while the datapath clock is off.
+Because \texttt{busy} clears only at DONE --- after the final \texttt{RLAST} ---
+the clock never gates off mid-burst, which would freeze the AXI handshake and
+deadlock the bus. This replaces the earlier held-\texttt{start} scheme and
+removes its dependency on \texttt{start} being a level.
+
+\field{Idle behaviour.} In IDLE / DONE only the handshake qualifiers
+\texttt{ARVALID} and \texttt{RREADY} are forced to 0. The address-channel
+payload is left at its last value, since AXI treats it as don't-care while
+\texttt{ARVALID} is low, and clock gating freezes registers at their last
+defined value rather than randomising them (the asynchronous reset of D-10
+initialises them), so there is no stale-data hazard when the gated clock
+restarts. DONE is entered only after the final \texttt{RLAST}, so dropping
+\texttt{RREADY} there never cuts a burst short.
+
+\field{Status.} In progress. Sequencer, channel processes, start/done and
+clock gate in bring-up; index and vertex address generation and vertex assembly
+not yet complete.
 
 \subsection{Index fetch}
 \field{Function.} % TODO

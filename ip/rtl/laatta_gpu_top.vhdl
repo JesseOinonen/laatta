@@ -19,14 +19,15 @@ entity laatta_gpu_top is
            arsize           : out std_logic_vector(2 downto 0);
            arburst          : out std_logic_vector(1 downto 0);
            arlen            : out std_logic_vector(7 downto 0);
-           arid             : out std_logic_vector(3 downto 0);  -- TBD NOT IMPLEMENTED
            -- AXI4 READ DATA CHANNEL
            rdata            : in  std_logic_vector(C_AXI_DATA_W-1 downto 0);
            rvalid           : in  std_logic;
            rready           : out std_logic;
            rlast            : in  std_logic;
            rresp            : in  std_logic_vector(1 downto 0);
-           rid              : in  std_logic_vector(3 downto 0)   -- TBD NOT IMPLEMENTED
+           -- Control signals
+           start            : in  std_logic  -- Start pulse to begin fetching a draw descriptor, index buffer and vertex buffer.
+           -- TBD NOT IMPLEMENTED
         );
 end laatta_gpu_top;
 
@@ -52,14 +53,12 @@ begin
             arsize      => arsize,
             arburst     => arburst,
             arlen       => arlen,
-            arid        => arid,
             rdata       => rdata,
             rvalid      => rvalid,
             rready      => rready,
             rlast       => rlast,
             rresp       => rresp,
-            rid         => rid,
-            start       => '1'  -- Always start fetching for now
+            start       => start
         );
 
 end RTL;
