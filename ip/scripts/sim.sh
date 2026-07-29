@@ -103,7 +103,9 @@ do_run() {
 
 do_wave() {
     cd "$WORK"
-    printf 'log_wave -recursive /%s\nrun all\nexit\n' "$TOP" > .wave_run.tcl
+    # No trailing 'exit': the test's $finish closes xsim on its own, and a
+    # leftover 'exit' command then hangs the batch.
+    printf 'log_wave -recursive /%s\nrun all\n' "$TOP" > .wave_run.tcl
     echo ">>> Logging all signals -> $WORK/$TOP.wdb (test: $TEST)"
     "$XSIM" "$TOP" -testplusarg "UVM_TESTNAME=$TEST" -tclbatch .wave_run.tcl
 }
