@@ -441,9 +441,9 @@ and resource usage.
 \toprule
 \textbf{Block} & \textbf{Status} & \textbf{Decisions} \\
 \midrule
-Geometry fetch         & In progress & D-03, D-04 \\
-\quad Index fetch      & In progress & --- \\
-\quad Vertex fetch / shading & In progress & D-03, D-04 \\
+Geometry fetch         & Verified    & D-03, D-04 \\
+\quad Index fetch      & Verified    & --- \\
+\quad Vertex fetch / shading & Verified & D-03, D-04 \\
 Clipping / culling     & Not started & --- \\
 Binner                 & Not started & D-05, D-06 \\
 Tile scheduler         & Not started & D-02, D-09 \\
@@ -486,7 +486,9 @@ assembly register (four 64-bit beats into one 256-bit vertex).
 \field{Related decisions.} D-03, D-04 (post-transform cache placement is open;
 the baseline implementation has no cache).
 
-\field{Status.} In progress (baseline: descriptor read plus uncached fetch).
+\field{Status.} Verified against the block-level UVM test
+(Section~\ref{sec:verification}): baseline, descriptor read plus uncached fetch,
+one outstanding transaction. No post-transform cache yet (D-03).
 
 \subsection{Geometry fetch: sequencer, AXI read channels and clock gating}
 
@@ -567,9 +569,9 @@ initialises them), so there is no stale-data hazard when the gated clock
 restarts. DONE is entered only after the final \texttt{RLAST}, so dropping
 \texttt{RREADY} there never cuts a burst short.
 
-\field{Status.} In progress. Sequencer, channel processes, start/done and
-clock gate in bring-up; index and vertex address generation and vertex assembly
-not yet complete.
+\field{Status.} Complete and verified. Sequencer, channel processes, start/done,
+clock gate, index and vertex address generation and vertex assembly all pass the
+block-level UVM test (Section~\ref{sec:verification}).
 
 \subsection{Index fetch}
 \field{Function.} % TODO
@@ -690,7 +692,61 @@ follows.
 \section{Verification}
 \label{sec:verification}
 
-% TODO
+Verification is at two levels: the Phase~0 golden model as the pixel-accurate
+reference for the whole pipeline (Section~\ref{sec:decisions},
+Appendix~\ref{app:data}), and a block-level UVM environment that checks each RTL
+block against its contract as it is written.
+
+\subsection{Block-level UVM environment}
+
+A single UVM testbench (\texttt{ip/tb}) is reused across blocks. It provides the
+agents the pipeline needs --- an AXI4 slave that models DRAM with backdoor
+preload, an AXI4-Stream agent, and an optional AXI4-Lite CSR agent --- plus the
+environment, base test and virtual sequence. A block is verified by adding three
+files: a filelist, a block-level top that wires the DUT to the shared
+interface, and a UVM test. Everything else is shared.
+
+The block simulation is driven by \texttt{ip/scripts/sim.sh}, a lightweight
+command-line flow over the Vivado xsim tools (no Vivado project):
+
+\begin{quote}\ttfamily
+scripts/sim.sh <block> [compile|elab|sim|gui|clean]
+\end{quote}
+
+\subsection{Geometry fetch --- verified}
+
+The geometry fetch block is verified black box: the test preloads a draw
+descriptor, an index buffer and a vertex buffer into the DRAM model in the
+\texttt{memory\_map.h} layout, pulses \texttt{start}, and checks what comes out.
+The scene uses a non-identity index list with a repeat, so index indirection and
+the uncached re-fetch are both exercised. The test asserts, with a specific
+\texttt{UVM\_ERROR} per failure:
+
+\begin{itemize}[leftmargin=1.4em,itemsep=0.2em]
+\item each output vertex equals \texttt{vb[indices[k]]} --- confirming descriptor
+      unpack, index indirection and 4-beat vertex assembly together;
+\item \texttt{TLAST} is asserted on the last vertex only;
+\item the read address sequence is exactly the descriptor at \texttt{CMD\_BASE},
+      then per index its 4-byte index read and the 4-beat vertex it points at,
+      with the right \texttt{ARLEN}/\texttt{ARSIZE}. This check localises a
+      broken address or descriptor path directly, rather than only as a wrong
+      output vertex.
+\end{itemize}
+
+The test passes: all output vertices, \texttt{TLAST} and the full read sequence
+match. Bring-up found and fixed three RTL faults worth recording as recurring
+hazards: a missing \texttt{resize} on the index address (a 32-bit target
+silently took the wrong bits of a widened \texttt{unsigned} product), a
+clock-gate enable derived from the transient \texttt{start} pulse instead of a
+latched active flag (the block never woke), and a re-fetch stall from a capture
+flag not being cleared on the loop-back edge.
+
+\subsection{Diagnosing a mismatch}
+
+Against the golden model, the failure pattern localises the fault: a whole
+surface wrong points at the depth sense or viewport transform; edges only at the
+fill rule or subpixel snapping; individual tiles at binning or the tile flush;
+colour gradients at the interpolation weights.
 
 %==============================================================================
 \section{Assumptions and open issues}

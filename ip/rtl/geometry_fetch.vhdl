@@ -51,7 +51,7 @@ architecture RTL of geometry_fetch is
     signal busy         : std_logic; -- internal busy flag
     signal idx_cntr     : unsigned(31 downto 0); -- index counter
 
-    type beat_array_t is array (0 to 3) of std_logic_vector(63 downto 0);
+    type beat_array_t is array (0 to 2) of std_logic_vector(63 downto 0);
     signal beats        : beat_array_t;
     signal beat_idx     : integer range 0 to 3;
     signal index        : std_logic_vector(31 downto 0); -- current index value for vertex buffer address calculation
@@ -98,6 +98,9 @@ begin
             vertex_valid <= '0';
             vertex_last  <= '0';
         elsif rising_edge(clk) then
+            if tvalid = '1' and tready = '1' then
+                vertex_valid <= '0';
+            end if;
             rdata_int <= (others => '0');
             if rresp /= RESP_OKAY then
                 rdata_err <= '1';
@@ -115,7 +118,6 @@ begin
                     when IDX =>
                         index <= rdata(31 downto 0);
                     when VERTEX =>
-                        vertex_valid <= '0';
                         beat_idx <= beat_idx + 1;
                         if rlast = '1' then
                             vertex_data  <= rdata & beats(2) & beats(1) & beats(0);
@@ -167,7 +169,7 @@ begin
                         ar_capt <= '0';
                     end if;
                 when IDX =>
-                    araddr   <= std_logic_vector(desc.ib_base + idx_cntr * 4);
+                    araddr <= std_logic_vector(resize(desc.ib_base + idx_cntr * 4, C_AXI_ADDR_W));
                     arlen    <= (others => '0'); -- Single beat for index buffer
                     arsize   <= AXSIZE_4B; -- 32-bit beat size
                     arburst  <= AXBURST_INCR; -- Incrementing burst
@@ -198,10 +200,12 @@ begin
                         arstate  <= IDLE;
                         idx_cntr <= (others => '0');
                         arvalid <= '0';
+                        ar_capt <= '0';
                     elsif rlast = '1' then
                         arstate <= IDX;
                         idx_cntr <= idx_cntr + 1;
                         arvalid <= '0';
+                        ar_capt <= '0';
                     end if;
                 when others => -- IDLE
                     rready <= '0';
@@ -213,6 +217,8 @@ begin
         end if;
     end process sequencer;
 
+    ---------------------------------------
+    -- send vertex data for the next module
     axi_stream : process(clk, rst_n)
     begin
         if rst_n = '0' then
