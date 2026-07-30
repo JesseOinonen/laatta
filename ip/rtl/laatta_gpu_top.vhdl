@@ -32,11 +32,19 @@ entity laatta_gpu_top is
 end laatta_gpu_top;
 
 architecture RTL of laatta_gpu_top is
-    signal rst_n  : std_logic;
-    signal tdata  : std_logic_vector(C_AXIS_DATA_W-1 downto 0);
-    signal tvalid : std_logic;
-    signal tready : std_logic;
-    signal tlast  : std_logic;
+    signal rst_n     : std_logic;
+
+    -- AXI-Stream from geometry fetch module
+    signal tdata_gf  : std_logic_vector(C_AXIS_DATA_W-1 downto 0);
+    signal tvalid_gf : std_logic;
+    signal tready_gf : std_logic;
+    signal tlast_gf  : std_logic;
+
+    -- AXI-Stream from clipping & culling module
+    signal tdata_cc  : std_logic_vector(C_AXIS_DATA_W-1 downto 0);
+    signal tvalid_cc : std_logic;
+    signal tready_cc : std_logic;
+    signal tlast_cc  : std_logic;
 begin
 
     rst_n_sync_inst : entity work.rst_n_sync
@@ -62,11 +70,26 @@ begin
             rready      => rready,
             rlast       => rlast,
             rresp       => rresp,
-            tdata       => tdata,
-            tvalid      => tvalid,
-            tready      => tready,
-            tlast       => tlast,
+            tdata       => tdata_gf,
+            tvalid      => tvalid_gf,
+            tready      => tready_gf,
+            tlast       => tlast_gf,
             start       => start
+        );
+
+    clip_cull_inst : entity work.clip_cull
+        port map (
+            clk_in      => clk,
+            rst_n       => rst_n,
+            tdata_in    => tdata_gf,
+            tvalid_in   => tvalid_gf,
+            tready_in   => tready_gf,
+            tlast_in    => tlast_gf,
+            tdata_out   => tdata_cc,
+            tvalid_out  => tvalid_cc,
+            tready_out  => tready_cc,
+            tlast_out   => tlast_cc,
+            start_out   => open
         );
 
 end RTL;

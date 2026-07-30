@@ -64,7 +64,6 @@ architecture RTL of geometry_fetch is
     signal ar_capt      : std_logic;
     
     signal clk          : std_logic;
-    signal ce           : std_logic;
 begin
 
     process(clk_in, rst_n)
