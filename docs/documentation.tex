@@ -427,6 +427,48 @@ decision would reverse.
 
 \field{Status.} Accepted. (Synchronizer implementation under bring-up.)
 
+\subsection{D-11 \quad Floating-point units: generated cores (FloPoCo) now,
+own special-function unit later}
+\field{Decision.} All floating-point arithmetic in the transform and lighting
+datapath --- FP32 multiply, add, reciprocal, reciprocal-square-root, and later a
+special-function unit for \texttt{sin}/\texttt{cos}/\texttt{exp}/\texttt{log}
+--- is initially provided by FloPoCo-generated VHDL cores, instantiated behind a
+stable in-house component interface (\texttt{fp\_mul}, \texttt{fp\_add},
+\texttt{fp\_rsqrt}, \texttt{fp\_recip}) with a latency-agnostic valid/ready
+wrapper. Hand-written equivalents are a parallel track, integrated behind the
+same interface when ready, with the FloPoCo cores kept as the correctness
+reference.
+
+\field{Rationale.} The GPU pipeline can be brought up and verified without
+blocking on the correctness of hand-written floating point. FloPoCo emits
+synthesizable VHDL that targets both the FPGA prototype and the ASIC flow
+(OpenROAD); unlike a vendor FPGA IP such as the Xilinx Floating-Point Operator,
+which infers device primitives and does not pass through the open ASIC
+toolchain, it therefore forces no later re-implementation to reach tape-out. Its
+polynomial function evaluator is the same table-plus-polynomial structure a
+from-scratch special-function unit would use, so it also serves as the golden
+reference for the in-house version. Graphics tolerates a loose accuracy budget
+(roughly 1\,ulp for multiply/add, several ulp for transcendentals); subnormals
+are flushed to zero (FTZ) with round-to-nearest-even only, which keeps both the
+generated and the hand-written units small.
+
+\field{Trade-off.} FloPoCo uses its own internal floating-point encoding (two
+exception bits above the IEEE-754 sign/exponent/mantissa); conversion happens
+once at the datapath boundaries via its \texttt{InputIEEE}/\texttt{OutputIEEE}
+blocks, and the FloPoCo encoding is carried through the interior. The cores
+present a plain fixed-latency pipeline rather than a handshake, so each is
+wrapped in the same valid/ready shell the datapath needs regardless. FloPoCo is
+a command-line generator rather than an integrated IP --- a one-time setup cost.
+
+\field{Evidence.} Engineering decision; extends the arithmetic-precision split
+(floating-point transform, fixed-point rasterisation) of D-07.
+
+\field{Affects.} \texttt{vertex\_shader} (MVP transform, normal transform,
+Gouraud lighting); \texttt{clip\_cull} (perspective-divide reciprocal); any
+later programmable shading. The \texttt{fp\_*} component interface.
+
+\field{Status.} Accepted (interim). Hand-written FP / SFU track open.
+
 %==============================================================================
 \section{Micro-architecture}
 \label{sec:uarch}
@@ -444,7 +486,8 @@ and resource usage.
 Geometry fetch         & Verified    & D-03, D-04 \\
 \quad Index fetch      & Verified    & --- \\
 \quad Vertex fetch / shading & Verified & D-03, D-04 \\
-Clipping / culling     & Not started & --- \\
+Vertex shader          & Not started & D-11 \\
+Clipping / culling     & Not started & D-11 \\
 Binner                 & Not started & D-05, D-06 \\
 Tile scheduler         & Not started & D-02, D-09 \\
 Rasteriser             & Not started & D-05, D-07, D-08 \\

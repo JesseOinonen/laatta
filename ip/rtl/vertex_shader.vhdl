@@ -1,6 +1,6 @@
 --------------------------------------
 -- Laatta GPU
--- Clipping & Culling module
+-- Vertex shading module
 -- Author: Jesse Oinonen
 --------------------------------------
 library IEEE;
@@ -10,25 +10,28 @@ use IEEE.numeric_std.all;
 library work;
 use work.laatta_pkg.all;
 
-entity clip_cull is
-    port ( clk_in     : in  std_logic;
-           rst        : in  std_logic;
+entity vertex_shader is
+    port ( clk_in       : in  std_logic;
+           rst          : in  std_logic;
            -- AXI stream input signals
-           tdata_in   : in  std_logic_vector(C_AXIS_DATA_W-1 downto 0);
-           tvalid_in  : in  std_logic;
-           tready_in  : out std_logic;
-           tlast_in   : in  std_logic;
+           tdata_in     : in  std_logic_vector(C_AXIS_DATA_W-1 downto 0);
+           tvalid_in    : in  std_logic;
+           tready_in    : out std_logic;
+           tlast_in     : in  std_logic;
            -- AXI stream output signals
-           tdata_out  : out std_logic_vector(C_AXIS_DATA_W-1 downto 0);
-           tvalid_out : out std_logic;
-           tready_out : in  std_logic;
-           tlast_out  : out std_logic;
+           tdata_out    : out std_logic_vector(C_AXIS_DATA_W-1 downto 0);
+           tvalid_out   : out std_logic;
+           tready_out   : in  std_logic;
+           tlast_out    : out std_logic;
            -- Control signals
-           start      : in  std_logic  -- Start pulse
+           mvp_matrix   : in  std_logic_vector(511 downto 0);
+           model_matrix : in  std_logic_vector(511 downto 0);
+           light_dir    : in  std_logic_vector( 95 downto 0);
+           start        : in  std_logic  -- Start pulse
         );
-end clip_cull;
+end vertex_shader;
 
-architecture RTL of clip_cull is
+architecture RTL of vertex_shader is
     signal clk  : std_logic;
     signal busy : std_logic;
     signal done : std_logic;
@@ -56,13 +59,5 @@ begin
         );
 
     
-    clipping : process(clk, rst_n)
-    begin
-        if rst_n = '0' then
-
-        elsif rising_edge(clk) then
-
-        end if;
-    end process clipping;
         
 end RTL;

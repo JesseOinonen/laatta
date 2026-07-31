@@ -40,6 +40,12 @@ architecture RTL of laatta_gpu_top is
     signal tready_gf : std_logic;
     signal tlast_gf  : std_logic;
 
+    -- AXI-Stream from vertex shader module
+    signal tdata_vs  : std_logic_vector(C_AXIS_DATA_W-1 downto 0);
+    signal tvalid_vs : std_logic;
+    signal tready_vs : std_logic;
+    signal tlast_vs  : std_logic;
+
     -- AXI-Stream from clipping & culling module
     signal tdata_cc  : std_logic_vector(C_AXIS_DATA_W-1 downto 0);
     signal tvalid_cc : std_logic;
@@ -77,7 +83,7 @@ begin
             start       => start
         );
 
-    clip_cull_inst : entity work.clip_cull
+    vertex_shader_inst : entity work.vertex_shader
         port map (
             clk_in      => clk,
             rst_n       => rst_n,
@@ -85,6 +91,21 @@ begin
             tvalid_in   => tvalid_gf,
             tready_in   => tready_gf,
             tlast_in    => tlast_gf,
+            tdata_out   => tdata_vs,
+            tvalid_out  => tvalid_vs,
+            tready_out  => tready_vs,
+            tlast_out   => tlast_vs,
+            start_out   => open
+        );
+
+    clip_cull_inst : entity work.clip_cull
+        port map (
+            clk_in      => clk,
+            rst_n       => rst_n,
+            tdata_in    => tdata_vs,
+            tvalid_in   => tvalid_vs,
+            tready_in   => tready_vs,
+            tlast_in    => tlast_vs,
             tdata_out   => tdata_cc,
             tvalid_out  => tvalid_cc,
             tready_out  => tready_cc,

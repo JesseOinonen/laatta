@@ -1,0 +1,5 @@
+--------------------------------------
+-- Floating point reciprocal wrapper
+-- FloPoCo Open-Source IP instance
+-- Author: Jesse Oinonen
+--------------------------------------
