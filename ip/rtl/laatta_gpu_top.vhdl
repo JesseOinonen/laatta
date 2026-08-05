@@ -85,17 +85,20 @@ begin
 
     vertex_shader_inst : entity work.vertex_shader
         port map (
-            clk_in      => clk,
-            rst_n       => rst_n,
-            tdata_in    => tdata_gf,
-            tvalid_in   => tvalid_gf,
-            tready_in   => tready_gf,
-            tlast_in    => tlast_gf,
-            tdata_out   => tdata_vs,
-            tvalid_out  => tvalid_vs,
-            tready_out  => tready_vs,
-            tlast_out   => tlast_vs,
-            start_out   => open
+            clk_in       => clk,
+            rst_n        => rst_n,
+            tdata_in     => tdata_gf,
+            tvalid_in    => tvalid_gf,
+            tready_in    => tready_gf,
+            tlast_in     => tlast_gf,
+            tdata_out    => tdata_vs,
+            tvalid_out   => tvalid_vs,
+            tready_out   => tready_vs,
+            tlast_out    => tlast_vs,
+            mvp_matrix   => open,
+            model_matrix => open,
+            light_dir    => open,
+            start        => open
         );
 
     clip_cull_inst : entity work.clip_cull
@@ -110,7 +113,7 @@ begin
             tvalid_out  => tvalid_cc,
             tready_out  => tready_cc,
             tlast_out   => tlast_cc,
-            start_out   => open
+            start       => open
         );
 
 end RTL;
