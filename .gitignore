@@ -1,5 +1,8 @@
 docs/documentation.md
-
+OpenGL/build/
+OpenGL/_deps/
+OpenGL/CMakeFiles/
+OpenGL/CMakeCache.txt
 # Phase 0 model
 model/build/
 model/output/
