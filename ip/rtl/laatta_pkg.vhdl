@@ -69,6 +69,8 @@ package laatta_pkg is
         beat0, beat1, beat2, beat3 : std_logic_vector(C_AXI_DATA_W-1 downto 0)
     ) return draw_descriptor_t;
 
+    function clog2(n : positive) return natural;
+
     type axi4_state_t is (
         IDLE,
         SEND_AR,
@@ -86,6 +88,9 @@ package laatta_pkg is
     constant AXSIZE_8B  : std_logic_vector(2 downto 0) := "011";  -- one 64-bit beat
 
     constant RESP_OKAY  : std_logic_vector(1 downto 0) := "00";
+
+
+    type slv_array is array (natural range <>) of std_logic_vector(31 downto 0);
 
 end package laatta_pkg;
 
@@ -106,6 +111,16 @@ package body laatta_pkg is
         d.tex_base      := unsigned(beat3(31 downto 0));
         d.flags         := beat3(63 downto 32);
         return d;
+    end function;
+
+    function clog2(n : positive) return natural is
+    begin
+        for i in 0 to 31 loop
+            if 2**i >= n then
+                return i;
+            end if;
+        end loop;
+        return 31;
     end function;
 
 end package body laatta_pkg;

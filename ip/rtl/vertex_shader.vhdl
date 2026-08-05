@@ -11,6 +11,9 @@ library work;
 use work.laatta_pkg.all;
 
 entity vertex_shader is
+    generic (
+        NUM_LANES : positive := 4 -- Dot motors in parallel, must be a power of 2
+    );
     port ( clk_in       : in  std_logic;
            rst          : in  std_logic;
            -- AXI stream input signals
@@ -32,9 +35,14 @@ entity vertex_shader is
 end vertex_shader;
 
 architecture RTL of vertex_shader is
-    signal clk  : std_logic;
-    signal busy : std_logic;
-    signal done : std_logic;
+    signal clk     : std_logic;
+    signal busy    : std_logic;
+    signal done    : std_logic;
+
+    signal mvp_row : node_row_t;      -- NUM_LANES x 4 matrix rows for MVP matrix
+    signal pos_vec : slv_array(0 to 3);
+    signal clip    : slv_array(0 to NUM_LANES-1);   -- x,y,z,w
+    signal lane_v  : std_logic_vector(NUM_LANES-1 downto 0);
 begin
 
     process(clk_in, rst_n)
@@ -58,6 +66,22 @@ begin
             clk_out => clk
         );
 
+    
+    gen_lanes: for k in 0 to NUM_LANES-1 generate
+        dot_k : entity work.dot_product
+            generic map ( 
+                VEC_LEN => 4 
+            )    
+            port map ( 
+                       clk       => clk, 
+                       rst_n     => rst_n,
+                       a         => mvp_row(k),     
+                       b         => pos_vec,        
+                       valid_in  => v_in,
+                       result    => clip(k),
+                       valid_out => lane_v(k) 
+            );
+    end generate;
     
         
 end RTL;
