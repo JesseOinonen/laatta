@@ -504,6 +504,59 @@ Tile flush             & Not started & D-01, D-02 \\
 Each block below follows the same template, so that the blocks can be compared
 and so that nothing is left unspecified by accident.
 
+\subsection{Floating-point unit wrappers (\texttt{common/fp})}
+\field{Function.} The transform and lighting datapath is built from thin VHDL
+wrappers around FloPoCo-generated cores (D-11), one per operation:
+\texttt{fp\_mul}, \texttt{fp\_add}, \texttt{fp\_recip} ($1/x$) and
+\texttt{fp\_rsqrt} ($1/\sqrt{x}$). Each presents the same stable interface ---
+\texttt{clk}, \texttt{rst\_n}, one or two 32-bit IEEE-754 operands,
+\texttt{valid\_in}, a 32-bit IEEE-754 \texttt{result\_out} and
+\texttt{valid\_out} --- so the FloPoCo core inside can later be swapped for a
+hand-written unit without touching the datapath.
+
+\field{Cores and latency.}
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Wrapper & FloPoCo core(s) & Pipeline depth (cycles) \\
+\midrule
+\texttt{fp\_mul}    & FPMult          & 1 \\
+\texttt{fp\_add}    & FPAdd           & 3 \\
+\texttt{fp\_recip}  & FPDiv           & 5 \\
+\texttt{fp\_rsqrt}  & FPSqrt + FPDiv  & $6+5=11$ \\
+\texttt{in\_ieee} / \texttt{out\_ieee} & InputIEEE / OutputIEEE & 0 (combinational) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\field{Format and conversion.} FloPoCo uses a 34-bit internal encoding (two
+exception bits above the IEEE-754 sign/exponent/mantissa). The generated
+\texttt{InputIEEE}/\texttt{OutputIEEE} converters are combinational (zero
+latency) and sit at the wrapper boundary: 32-bit IEEE in, 34-bit FloPoCo through
+the core, 32-bit IEEE out.
+
+\field{Valid tracking.} The cores carry data at a fixed latency but expose no
+\texttt{valid}; each wrapper delays \texttt{valid\_in} by the core's pipeline
+depth with a shift register (a single flop for the depth-1 multiplier). The
+converters add no cycles, so the shift depth equals the core depth.
+
+\field{Composed functions.} \texttt{fp\_recip} is \texttt{FPDiv} with the
+numerator tied to the constant $1.0$; \texttt{fp\_rsqrt} chains \texttt{FPSqrt}
+into \texttt{FPDiv}$(1.0,\cdot)$. The $1.0$ is hard-coded directly in the 34-bit
+FloPoCo encoding (\texttt{"01"\&"0"\&"01111111"\&} zeros). \texttt{fp\_rsqrt}
+keeps the FloPoCo format internally (one \texttt{InputIEEE}, one
+\texttt{OutputIEEE}) rather than reusing the \texttt{fp\_recip} wrapper: separate
+instances share no hardware, so nesting it would only add redundant conversions.
+
+\field{Back-pressure.} The FloPoCo cores have no clock enable and cannot be
+stalled cycle-by-cycle, so down-stream back-pressure must be absorbed at the
+datapath boundaries (input gating and an output skid buffer sized to the
+pipeline depth), never inside the pipeline.
+
+\field{Status.} \texttt{fp\_mul}, \texttt{fp\_add}, \texttt{fp\_recip},
+\texttt{fp\_rsqrt} implemented (interim, FloPoCo per D-11). Unit-level checking
+against the C++ golden float reference is pending.
+
 \subsection{Geometry fetch}
 \field{Function.} Reads the draw descriptor from the command base
 (Section~\ref{sec:memmap}), then walks the index buffer and fetches the vertex
