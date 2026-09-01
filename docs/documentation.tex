@@ -8,6 +8,7 @@
 \usepackage[utf8]{inputenc}
 \usepackage[english]{babel}
 \usepackage[a4paper,margin=25mm,headheight=15pt]{geometry}
+\usepackage{amsmath}
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{tabularx}
@@ -19,9 +20,9 @@
 %------------------------------------------------------------------ metadata --
 \newcommand{\docTitle}{Laatta --- Tile-Based GPU Architecture Specification}
 \newcommand{\docID}{LAATTA-ARCH-001}
-\newcommand{\docVersion}{0.2}
+\newcommand{\docVersion}{0.3}
 \newcommand{\docStatus}{Draft}
-\newcommand{\docDate}{2026-07-21}
+\newcommand{\docDate}{2026-09-01}
 \newcommand{\docAuthor}{Jesse Oinonen}
 
 %----------------------------------------------------------- page furniture ---
@@ -96,6 +97,9 @@ measurements from the Phase~0 golden model that justify them.
                    pixel formats, target platform. & \docAuthor \\
 0.2 & 2026-07-21 & Phase~0 golden model complete. Architecture diagram updated
                    with tile buffer, tile scheduler and separate index fetch. &
+                   \docAuthor \\
+0.3 & 2026-09-01 & Runtime telemetry and GUI specified: \texttt{perf\_counters}
+                   block, register map, snapshot semantics and panel layout. & 
                    \docAuthor \\
 \bottomrule
 \end{tabularx}
@@ -182,6 +186,9 @@ product requirements:
 
 This document covers the fixed-function pipeline: vertex transform, clipping and
 culling, binning, tile buffer, rasterisation, depth test and blending.
+It also covers the runtime telemetry path and the GUI that displays it
+(Section~\ref{sec:gui}), since the quantities it reports are the ones the
+architectural decisions were taken against.
 Texturing, programmable shading, SIMD and SIMT execution are planned for later
 phases and are out of scope here.
 
@@ -845,6 +852,377 @@ fill rule or subpixel snapping; individual tiles at binning or the tile flush;
 colour gradients at the interpolation weights.
 
 %==============================================================================
+\section{Runtime telemetry and GUI}
+\label{sec:gui}
+
+Every sizing decision in Section~\ref{sec:decisions} was taken from a number
+produced by the Phase~0 golden model, and every one of them rests on an
+untimed traffic count (Section~\ref{sec:assumptions}, A-01). The GUI exists to
+measure the same quantities on the running hardware and put them next to the
+predicted ones. It is therefore not a decoration on top of the project but the
+instrument that closes the loop between the model and the silicon: a decision
+such as D-02 (tile size) or D-03 (vertex cache) is only confirmed once the
+board reports the traffic the model said it would.
+
+It has a second, more immediate use during Phase~1 bring-up. A block-level UVM
+test (Section~\ref{sec:verification}) proves a block against its contract in
+isolation; it says nothing about where a full frame spends its time. The
+per-block activity and stall counters below are what answer that, and they
+answer the one question the whole architecture is built around --- whether the
+pipeline is memory-bound or compute-bound at a given tile size.
+
+\subsection{Structure}
+
+Telemetry is split across three levels, each doing only what it is good at.
+
+\field{Programmable logic --- \texttt{perf\_counters}.} A counter block in the
+fabric, one AXI4-Lite slave, holding free-running event counters plus a
+frame-coherent snapshot register file. It only counts: an event is a single-bit
+qualifier already present in the pipeline (a handshake, a \texttt{busy} flag, a
+\texttt{done} pulse), and the block increments a register when it is high. There
+are no dividers, no floating-point units and no timers in it.
+
+\field{Processing system --- the telemetry agent.} Software on the Cortex-A9
+that wakes on the end-of-frame interrupt, reads the snapshot as one block,
+timestamps it from the PS global timer, converts counts into rates, and streams
+the record to the host. It also holds the wide accumulators: the PL counters are
+32-bit and the agent extends them to 64-bit across frames.
+
+\field{Host --- the GUI.} A desktop application that receives the record stream
+and draws it: current values, rolling history, and the golden-model prediction
+for the same scene alongside the measured value. It reuses the existing OpenGL
+viewer in \texttt{OpenGL/} with an immediate-mode UI layer, so the same binary
+can display a model run and a hardware run in the same panels.
+
+\field{Rationale for the split.} Every quantity the user actually wants is a
+ratio --- frames per second, bytes per second, percent utilisation, fragments
+per cycle. Ratios need division, and division in RTL costs either latency or
+area for a number that changes once per frame and is read by a human. Counting
+is cheap and must be in the fabric because the events only exist there;
+everything else is arithmetic on twelve to forty 32-bit words per frame, which
+is free on the PS. The rule for the block is therefore: \emph{the fabric counts,
+software divides, the host draws.}
+
+\field{Transport.} Records are small --- under 200\,B per frame, roughly
+12\,kB/s at 60\,fps --- so the link is not a constraint. Ethernet is the
+baseline because the host GUI is a separate machine; UART at 115\,200\,baud is
+the fallback during early bring-up, and is sufficient if the record is sent
+every $n$th frame instead of every frame.
+
+\subsection{Quantities displayed}
+
+Table~\ref{tab:gui-metrics} lists what the GUI shows and where each value comes
+from. \emph{Counted} means a hardware counter in \texttt{perf\_counters};
+\emph{derived} means computed on the PS from counted values; \emph{static} means
+a read-only mirror of an RTL generic; \emph{estimated} means it is not measured
+at all and is displayed as an estimate (Section~\ref{sec:gui-power}).
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}llXl@{}}
+\toprule
+\textbf{Quantity} & \textbf{Unit} & \textbf{Source} & \textbf{Kind} \\
+\midrule
+Frame rate              & frame/s      & \texttt{FRAME\_CYCLES} and $f_{\mathrm{gpu}}$ & derived \\
+Frame latency           & ms           & \texttt{FRAME\_CYCLES}, \texttt{GEOM\_CYCLES}, \texttt{TILE\_CYCLES} & derived \\
+Memory traffic          & B/frame      & AXI beat counters, per client & counted \\
+Memory bandwidth        & MB/s         & traffic $\div$ frame time & derived \\
+Triangle count          & tri/frame    & \texttt{TRI\_IN}, \texttt{TRI\_VIS}, \texttt{BIN\_ENTRIES} & counted \\
+Frame count             & frames       & \texttt{FRAME\_ID} & counted \\
+GPU clock               & MHz          & \texttt{REF\_CYCLES} against the PS timer & measured \\
+Tile size               & px           & \texttt{CFG\_A} mirror of the RTL generic & static \\
+Resolution              & px           & \texttt{CFG\_B} mirror / draw descriptor & static \\
+Pipeline utilisation    & \%           & per-block active and stall counters & derived \\
+Rasterisation throughput& frag/cycle, Mpix/s & \texttt{FRAG\_GEN}, \texttt{FRAG\_PASS}, \texttt{PIX\_WR} & derived \\
+Power consumption       & W            & XADC sensors and an activity-weighted model & estimated \\
+\bottomrule
+\end{tabularx}
+\caption{Quantities displayed by the GUI and how each is obtained.}
+\label{tab:gui-metrics}
+\end{table}
+
+\subsection{Counter definitions}
+\label{sec:gui-counters}
+
+Each definition states what is counted, not what is displayed. Ambiguity here is
+what makes a telemetry number useless later, so the counting point is named in
+every case.
+
+\field{Frame rate.} Not measured against wall time. \texttt{FRAME\_CYCLES}
+counts pipeline clock cycles between consecutive end-of-frame pulses, and the
+rate is $f_{\mathrm{gpu}} / \texttt{FRAME\_CYCLES}$. Deriving it from a cycle
+count rather than from PS timestamps removes interrupt latency and scheduler
+jitter from the number, and makes it reproducible in simulation, where wall time
+has no meaning. The PS timestamp is kept in the record anyway as a cross-check;
+a persistent disagreement between the two means frames are being dropped
+somewhere between the PL and the display.
+
+\field{Frame latency.} The interval from the \texttt{start} pulse that launches
+a frame to the completion of the last tile flush --- the final \texttt{BVALID}
+of the colour write, not the last pixel produced, since the frame is not
+finished until it is in DRAM. It is reported as a total plus the split that
+matters architecturally: \texttt{GEOM\_CYCLES}, the geometry pass up to the last
+parameter-buffer write, and \texttt{TILE\_CYCLES}, the per-tile pass. Tiling
+buys traffic at the price of a full frame of added latency
+(Section~\ref{sec:intro}), and this split is where that price becomes visible.
+In Phase~1 the two passes do not overlap, so frame latency and frame period are
+the same number; they are counted separately regardless, because the moment the
+geometry pass of frame $n{+}1$ is allowed to run against the tile pass of frame
+$n$ they diverge, and a display that conflates them would silently start lying.
+
+\field{Memory traffic.} Counted at the AXI interface as \emph{beats}, not as
+bytes requested: one increment per accepted read beat
+(\texttt{RVALID}\,$\land$\,\texttt{RREADY}) and per accepted write beat
+(\texttt{WVALID}\,$\land$\,\texttt{WREADY}), converted to bytes by the bus width
+in software. Beats are what the DRAM controller actually moves, so this is the
+burst-rounded figure and is directly comparable with the byte columns of
+Tables~\ref{tab:tile-sweep} and~\ref{tab:vcache}, which are burst-rounded for
+the same reason. Traffic is broken out per client, using the same client
+classes the golden model accounts against (\texttt{Cmd},
+\texttt{IndexFetch}, \texttt{VertexFetch}, \texttt{ParamWrite},
+\texttt{ParamRead}, \texttt{ColorWrite}, \texttt{Texture}), so a measured
+breakdown can be placed field by field against
+\texttt{model/src/memory/dram\_model.h}. The per-client split is the whole
+point: a total tells you the design is memory-bound, the split tells you which
+decision to revisit.
+
+\field{Memory bandwidth.} Traffic divided by frame time, computed on the PS and
+shown three ways: total MB/s, per-client MB/s, and as a percentage of the
+achievable DDR bandwidth of the PS port. The last of these is only as good as
+the answer to Q-01, so until that is measured the GUI shows the percentage
+against the \emph{theoretical} peak and labels it as such rather than quietly
+using a guess as the denominator.
+
+\field{Triangle count.} Four counting points, because a single ``triangle
+count'' hides the two ratios that matter. \texttt{TRI\_IN} counts triangles
+submitted (also derivable as \texttt{index\_count}/3 from the descriptor, and
+compared against it as a sanity check); \texttt{TRI\_VIS} counts those surviving
+clip and back-face culling; \texttt{BIN\_ENTRIES} counts tile-list entries
+written by the binner; \texttt{TRI\_RAST} counts triangles read back and set up
+during the tile pass. From these the GUI shows the cull rate
+$1-\texttt{TRI\_VIS}/\texttt{TRI\_IN}$ and the binning fan-out
+$\texttt{BIN\_ENTRIES}/\texttt{TRI\_VIS}$, the measured counterpart of the
+tiles-per-triangle column of Table~\ref{tab:tile-sweep} --- 1.16 at
+$32\times32$, and the number D-05 depends on.
+
+\field{Frame count.} A free-running 32-bit counter of end-of-frame pulses since
+reset, never cleared by a snapshot. It is also the sequence number of the
+telemetry record: the host detects a dropped or reordered record by a gap in it,
+which matters because rates computed from a record pair straddling a gap are
+wrong and would otherwise be plotted as a genuine performance event. At 60\,fps
+it wraps after roughly 2.3 years of continuous running; the PS extends it to
+64-bit anyway.
+
+\field{GPU clock.} Nominally a configuration value, but displayed as a measured
+one, because a wrong assumed clock silently scales every derived quantity on the
+screen. \texttt{REF\_CYCLES} free-runs on the pipeline clock; the PS samples it
+twice a known interval apart on its own timer and divides. The nominal value
+from the clocking configuration is shown next to it, and a disagreement beyond a
+small tolerance is flagged --- it means the PLL configuration is not what the
+build thinks it is.
+
+\field{Tile size.} $32\times32$ pixels per D-02, taken from the RTL generic. It
+is displayed from a read-only mirror in \texttt{CFG\_A} rather than from a host
+constant, so the panel reports what the loaded bitstream actually contains. The
+distinction stops the most tedious class of measurement error: comparing runs
+made with different bitstreams while the GUI shows the same configuration for
+both.
+
+\field{Resolution.} Handled the same way, from \texttt{CFG\_B}. Note that
+resolution is not currently a field of the draw descriptor
+(Table~\ref{tab:descriptor}); it is a build-time constant, so the mirror is the
+only authoritative source. If resolution later becomes settable per draw, it
+gains a descriptor field and the GUI reads it from there instead --- recorded as
+Q-07.
+
+\field{Pipeline utilisation.} Three counters per block, all gated by the same
+frame window: \texttt{ACTIVE} (the block's \texttt{busy} is high),
+\texttt{STALL\_DS} (the block holds valid output but the downstream
+\texttt{tready} is low), and \texttt{STALL\_MEM} (the block is waiting on
+memory --- \texttt{ARVALID} without \texttt{ARREADY}, or an accepted address
+with no \texttt{RVALID} yet). Utilisation is \texttt{ACTIVE} divided by
+\texttt{FRAME\_CYCLES}. The stall split is the reason for having three counters
+rather than one: it attributes the idle time. A pipeline that is 40\,\% utilised
+because it waits on DRAM and one that is 40\,\% utilised because a downstream
+block backpressures it call for opposite fixes, and utilisation alone does not
+distinguish them. The blocks instrumented in Phase~1 are geometry fetch, vertex
+shader, clip/cull, binner, tile scheduler, rasteriser and tile flush.
+
+\field{Rasterisation throughput.} \texttt{FRAG\_GEN} counts fragments the
+rasteriser emits (covered samples passing the edge tests), \texttt{FRAG\_PASS}
+those surviving the depth test, and \texttt{PIX\_WR} pixels written to the
+framebuffer at tile flush. The GUI shows fragments per cycle --- the direct
+measure of whether the rasteriser sustains its design rate --- and the effective
+fill rate $\texttt{FRAG\_GEN}\times f_{\mathrm{gpu}}$ in Mpixel/s. Overdraw is
+$\texttt{FRAG\_GEN}/\texttt{PIX\_WR}$, measured at 1.15 in the model on both
+test scenes; Q-03 (HSR sizing) cannot be answered until this is observed on
+content with real depth complexity, and this counter is what will answer it.
+
+\subsection{Power consumption}
+\label{sec:gui-power}
+
+Power is the one quantity in Table~\ref{tab:gui-metrics} that cannot be counted,
+and the panel is built to say so rather than to present a plausible number.
+
+The Arty Z7 has no on-board current-sense rails, so board power is not readable
+from the PS. The XADC does provide die temperature and the on-chip supply
+voltages (\texttt{VCCINT}, \texttt{VCCAUX}, \texttt{VCCBRAM}), which are real
+measurements and are displayed as such --- temperature in particular is a useful
+proxy for a sustained change in activity, and a genuine indicator during long
+runs.
+
+The power figure itself is an \emph{estimate}: per-block dynamic power from the
+Vivado power report at a reference activity, scaled by the activity this frame
+actually had --- the same \texttt{ACTIVE} and AXI beat counters used for
+utilisation --- plus the static component. It is shown with its inputs visible
+(the reference report version and the scaling factors) and labelled as an
+estimate everywhere it appears, never plotted on the same axis as a measured
+quantity. Its intended use is comparative, not absolute: the ratio between two
+configurations of the same design --- clock gating on versus off, one tile size
+versus another --- is meaningful, while the absolute watt figure is not
+trustworthy without a bench measurement.
+
+A shunt or in-line USB power meter on the board supply gives a real number, but
+a whole-board one that includes the PS, DDR and peripherals, so it does not
+isolate the GPU either. Where such a measurement is taken it is entered into the
+GUI as a separate, explicitly labelled reading rather than merged with the
+estimate. Resolving this properly is Q-06.
+
+\subsection{Register map}
+
+\texttt{perf\_counters} is an AXI4-Lite slave in the PL register window reached
+through the PS general-purpose port. It deliberately does not appear in the DRAM
+address map of Table~\ref{tab:memmap}: it is a register window, not memory, and
+nothing in the pipeline addresses it.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Offset} & \textbf{Register} & \textbf{Contents} \\
+\midrule
+\texttt{0x00} & \texttt{ID}          & \texttt{0x4C41\_4154} (``LAAT''); block version in the upper half \\
+\texttt{0x04} & \texttt{CFG\_A}      & Tile width, tile height, bytes per pixel (generic mirror) \\
+\texttt{0x08} & \texttt{CFG\_B}      & Framebuffer width, height (generic mirror) \\
+\texttt{0x0C} & \texttt{CTRL}        & Counter enable, snapshot mode, clear \\
+\texttt{0x10} & \texttt{STATUS}      & Snapshot valid, overflow flags, pipeline busy \\
+\texttt{0x14} & \texttt{FRAME\_ID}   & Free-running frame counter \\
+\texttt{0x18} & \texttt{FRAME\_CYCLES}  & Cycles in the last frame \\
+\texttt{0x1C} & \texttt{GEOM\_CYCLES}   & Cycles in the geometry pass \\
+\texttt{0x20} & \texttt{TILE\_CYCLES}   & Cycles in the per-tile pass \\
+\texttt{0x24} & \texttt{REF\_CYCLES}    & Free-running cycle counter, for clock measurement \\
+\texttt{0x28}--\texttt{0x34} & \texttt{TRI\_*}   & \texttt{IN}, \texttt{VIS}, \texttt{BIN\_ENTRIES}, \texttt{RAST} \\
+\texttt{0x38}--\texttt{0x40} & \texttt{FRAG\_*}  & \texttt{GEN}, \texttt{PASS}, \texttt{PIX\_WR} \\
+\texttt{0x50}--\texttt{0x6C} & \texttt{RD\_BEATS[c]}  & Read beats per client, one word each \\
+\texttt{0x70}--\texttt{0x8C} & \texttt{WR\_BEATS[c]}  & Write beats per client \\
+\texttt{0x90}--\texttt{0xAC} & \texttt{ACTIVE[b]}     & Active cycles per block \\
+\texttt{0xB0}--\texttt{0xCC} & \texttt{STALL\_DS[b]}  & Downstream-stall cycles per block \\
+\texttt{0xD0}--\texttt{0xEC} & \texttt{STALL\_MEM[b]} & Memory-stall cycles per block \\
+\bottomrule
+\end{tabular}
+\caption{\texttt{perf\_counters} register map. All counters are 32-bit and
+read-only; \texttt{CTRL} is the only writable register.}
+\label{tab:perf-regmap}
+\end{table}
+
+\subsection{Snapshot semantics}
+
+The rule the block is built around: \emph{a record must describe exactly one
+frame}. Reading counters one at a time while the pipeline runs produces a record
+whose fields belong to different frames, and ratios computed from it --- a
+utilisation above 100\,\%, a fan-out below one --- look like hardware faults and
+have cost more debugging time in more projects than the counters ever saved.
+
+The end-of-frame pulse therefore copies every counter into a shadow register
+file in one cycle and clears the per-frame counters. The PS reads only the
+shadow copy, at leisure, while the next frame is already accumulating.
+\texttt{FRAME\_ID} and \texttt{REF\_CYCLES} are excluded from the clear, being
+free-running by definition.
+
+\field{Overflow.} Counters saturate rather than wrap, and set a sticky bit in
+\texttt{STATUS}. A saturated counter is displayed as an explicit
+``$>$'' bound in the GUI, not as its value; a wrapped one would be displayed as
+a small number and believed. At 125\,MHz a 32-bit cycle counter covers 34\,s,
+far beyond any single frame, so saturation in practice means the pipeline has
+hung --- which is itself worth showing.
+
+\field{Missed reads.} If the PS has not consumed a snapshot before the next
+end-of-frame pulse, the new frame overwrites it and sets a
+\texttt{missed} bit. The host counts these; frames whose records were lost are
+gaps in \texttt{FRAME\_ID}, and the GUI breaks its history plot at a gap instead
+of interpolating across it.
+
+\subsection{Panel layout}
+
+One window, four panels plus a status strip, arranged so the configuration that
+a measurement was taken under is always on screen next to the measurement.
+
+\begin{verbatim}
++---------------------------------------------------------------+
+| frame 14 812 | 58.9 fps | 16.98 ms | 125.0 MHz | 32x32 | 720p  |
++----------------------------+----------------------------------+
+| MEMORY                     | PIPELINE                          |
+|  total     9.20 MB/frame   |  geom fetch  [######----]  61 %   |
+|  bandwidth  542 MB/s       |     mem stall              27 %   |
+|  param wr   1.35 MB   14 % |  vtx shader  [########--]  78 %   |
+|  param rd   1.35 MB   14 % |  binner      [###-------]  32 %   |
+|  vertex     1.47 MB   16 % |  raster      [#########-]  91 %   |
+|  colour wr  3.69 MB   40 % |  tile flush  [##--------]  18 %   |
+|  model says 9.20 MB   0 %  |  frag/cycle   0.87                |
++----------------------------+----------------------------------+
+| GEOMETRY                   | POWER  (estimated)                |
+|  submitted    55 884 tri   |  dynamic     1.4 W  (est.)        |
+|  visible      31 210 tri   |  static      0.2 W  (est.)        |
+|  culled          44 %      |  die temp   47.3 C  (measured)    |
+|  bin entries  36 204       |  VCCINT     0.98 V  (measured)    |
+|  fan-out       1.16        |                                   |
+|  overdraw      1.15        |                                   |
++----------------------------+----------------------------------+
+| latency: geometry 7.1 ms | tile pass 9.9 ms | frames lost 0    |
++---------------------------------------------------------------+
+\end{verbatim}
+
+Two properties of the layout are deliberate. First, the header strip carries the
+configuration --- clock, tile size, resolution --- because a screenshot of the
+panel has to be self-describing to be worth keeping. Second, the memory panel
+shows the golden model's prediction for the same scene beside the measured
+total, with the difference as a percentage; that row is the reason the GUI
+exists, and putting it anywhere else would make it optional.
+
+\field{History.} Each numeric field backs a rolling plot of the last few hundred
+frames, since a frame-time or bandwidth spike is invisible in an instantaneous
+reading. Records are also logged to CSV in the same column layout the model's
+\texttt{sweep.csv} uses, so a hardware run and a model sweep can be compared
+with the existing tooling instead of by eye.
+
+\subsection{Cost and status}
+
+\field{Resources.} Roughly forty 32-bit counters, their shadow copies and an
+AXI4-Lite decode --- on the order of 2600 flip-flops and a few hundred LUTs, no
+BRAM and no DSP. Against the XC7Z020 this is well under 3\,\% of the fabric, and
+none of it is in a critical path: every counter increments off a qualifier that
+already exists, and the snapshot copy is a single parallel load between frames.
+
+\field{Effect on timing.} The counter block must not become the reason the
+design misses timing. Counters are fed from registered copies of the pipeline
+qualifiers rather than tapping combinational signals, accepting one cycle of
+skew --- irrelevant against a frame --- in exchange for keeping the fabric fully
+decoupled from the instrumentation.
+
+\field{Related decisions.} D-02 (tile size), D-03 (vertex cache) and D-05
+(parameter buffer layout) are all validated by the traffic and fan-out counters;
+Q-01 (achievable DRAM bandwidth), Q-03 (HSR sizing) and Q-06 (power) are
+answered, or bounded, by this section's counters.
+
+\field{Status.} Specified; not implemented. It is scheduled after the Phase~1
+pipeline produces a complete frame, since most of its counters are attached to
+blocks that do not yet exist. The register map and snapshot semantics are fixed
+now so that blocks can expose their qualifiers as they are written, rather than
+being retrofitted.
+
+%==============================================================================
 \section{Assumptions and open issues}
 \label{sec:assumptions}
 
@@ -896,6 +1274,23 @@ Its size depends on scene complexity, which is not known in advance.
 
 \item[Q-05 --- Is the framebuffer double-buffered, and what is the memory
 budget?]
+% TODO
+
+\item[Q-06 --- How is power to be measured rather than estimated?]
+The Arty Z7 has no on-board current-sense rails, so the power figure of
+Section~\ref{sec:gui-power} is an activity-weighted estimate from a synthesis
+power report, valid for comparing two configurations of the same design but not
+as an absolute. An in-line measurement on the board supply gives a real number
+but includes the PS, DDR and peripherals. What is needed is a defensible way to
+isolate the GPU's share.
+% TODO
+
+\item[Q-07 --- Should resolution and tile size become runtime parameters?]
+Both are build-time generics today, mirrored read-only into the GUI's
+configuration registers (Section~\ref{sec:gui}). Making resolution runtime
+settable means a new draw descriptor field (Table~\ref{tab:descriptor});
+making tile size runtime settable is a far larger change, since the tile buffer
+is sized from it.
 % TODO
 \end{records}
 
