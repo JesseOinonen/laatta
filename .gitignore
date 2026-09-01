@@ -7,6 +7,8 @@ OpenGL/CMakeCache.txt
 model/build/
 model/output/
 
+build/
+
 # Block-level xsim build (scripts/sim_geometry_fetch.sh)
 ip/sim/build/
 
