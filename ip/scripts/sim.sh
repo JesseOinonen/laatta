@@ -7,10 +7,11 @@
 # block's test. Direct xsim tools only — the Vivado project flow (make build)
 # stays available separately for sharing / GUI project work.
 #
-#   scripts/sim.sh <block> [compile|elab|sim|gui|clean]
+#   scripts/sim.sh <block> [rtl|compile|elab|sim|wave|gui|clean]
 #
 # Examples:
 #   scripts/sim.sh geometry_fetch          # compile + elaborate + run (default)
+#   scripts/sim.sh geometry_fetch rtl      # RTL syntax/type check, no testbench
 #   scripts/sim.sh geometry_fetch gui      # open the waveform GUI
 #   scripts/sim.sh geometry_fetch clean
 #   TEST=my_other_test scripts/sim.sh geometry_fetch
@@ -34,7 +35,7 @@ list_blocks() {
 }
 
 if [ -z "$BLOCK" ]; then
-    echo "usage: $0 <block> [compile|elab|sim|gui|clean]"
+    echo "usage: $0 <block> [rtl|compile|elab|sim|wave|gui|clean]"
     list_blocks
     exit 1
 fi
@@ -79,6 +80,24 @@ SV_TB=(
 )
 INC=(-i "$IP_DIR/tb/uvm" -i "$IP_DIR/tb/cases" -i "$IP_DIR/tb/top")
 
+# Analyse and elaborate the block's RTL on its own: no testbench, no UVM.
+# A fast syntax and type check for a block still being written, which needs no
+# top or test to exist yet. Elaborates the entity named after the block.
+do_rtl() {
+    mkdir -p "$WORK"; cd "$WORK"
+    if [ ${#RTL_VHDL[@]} -gt 0 ]; then
+        echo ">>> Analysing VHDL RTL"
+        "$XVHDL" --2008 "${RTL_VHDL[@]}"
+    fi
+    if [ ${#RTL_SV[@]} -gt 0 ]; then
+        echo ">>> Analysing (System)Verilog RTL"
+        "$XVLOG" -sv "${INC[@]}" "${RTL_SV[@]}"
+    fi
+    echo ">>> Elaborating $BLOCK (RTL only, no testbench)"
+    "$XELAB" "$BLOCK" -s "${BLOCK}_rtl"
+    echo ">>> $BLOCK RTL OK"
+}
+
 do_compile() {
     mkdir -p "$WORK"; cd "$WORK"
     if [ ${#RTL_VHDL[@]} -gt 0 ]; then
@@ -118,11 +137,12 @@ do_gui() {
 }
 
 case "$ACTION" in
+    rtl)     do_rtl ;;
     compile) do_compile ;;
     elab)    do_compile; do_elab ;;
     sim)     do_compile; do_elab; do_run ;;
     wave)    do_compile; do_elab; do_wave ;;
     gui)     do_compile; do_elab; do_gui ;;
     clean)   rm -rf "$WORK"; echo "removed $WORK" ;;
-    *) echo "unknown action: $ACTION (compile|elab|sim|wave|gui|clean)"; exit 1 ;;
+    *) echo "unknown action: $ACTION (rtl|compile|elab|sim|wave|gui|clean)"; exit 1 ;;
 esac

@@ -11,7 +11,7 @@ SCRIPTS_DIR := ../../scripts
 TEST ?= csr_test
 TESTS := csr_test stream_test dram_read_test datapath_test
 
-.PHONY: all build files sim regression gui clean
+.PHONY: all build files check sim regression gui clean
 
 all: build
 
@@ -25,6 +25,35 @@ build: $(BUILD)
 # Refresh the Vivado file list (after adding/removing sources).
 files: $(BUILD)
 	@cd $(BUILD) && $(VIVADO) -mode batch -source $(SCRIPTS_DIR)/add_files.tcl
+
+# Analyse + elaborate one block's RTL, no testbench and no UVM: a fast
+# syntax/type check while a block is still being written. Uses the
+# project-less xsim flow (scripts/sim.sh), not the Vivado project above.
+#   make check-vertex_shader
+check-%:
+	@scripts/sim.sh $* rtl
+
+# Same for every block that has a file list in sim/. Catches the case where a
+# change to laatta_pkg breaks a block you were not working on.
+check:
+	@failed=0; failed_blocks=""; \
+	for f in sim/*.f; do \
+	  b=$$(basename $$f .f); \
+	  echo ""; echo ">>> checking $$b"; \
+	  if scripts/sim.sh $$b rtl >/dev/null 2>&1; then \
+	    echo "OK: $$b"; \
+	  else \
+	    failed=$$((failed+1)); failed_blocks="$$failed_blocks $$b"; \
+	    echo "FAILED: $$b"; scripts/sim.sh $$b rtl 2>&1 | grep -E "^ERROR" || true; \
+	  fi; \
+	done; \
+	echo ""; \
+	if [ $$failed -gt 0 ]; then \
+	  echo "RTL check failed for:$$failed_blocks"; \
+	else \
+	  echo "RTL check passed for every block"; \
+	fi; \
+	[ $$failed -eq 0 ]
 
 # Run a single test.
 sim: build

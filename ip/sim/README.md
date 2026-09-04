@@ -11,6 +11,7 @@ work and sharing.
 
 ```
 scripts/sim.sh <block>            # compile + elaborate + run the block's test
+scripts/sim.sh <block> rtl        # analyse + elaborate the RTL alone, no TB
 scripts/sim.sh <block> compile    # analyse RTL + testbench only
 scripts/sim.sh <block> elab       # up to elaboration
 scripts/sim.sh <block> gui        # open the waveform GUI
@@ -27,6 +28,21 @@ VIVADO_BIN=/opt/.../bin  scripts/sim.sh <block>
 Build artefacts land in `ip/sim/build/<block>/` (gitignored). The waveform GUI
 reuses the snapshot built there, so `gui` works without rebuilding.
 
+## Checking RTL while a block is still being written
+
+`rtl` is the odd one out: it analyses the block's RTL and elaborates the entity
+named after the block, with no testbench and no UVM. It therefore needs only
+the file list, not a top or a test, which makes it the check to run on a block
+that does not compile yet. It is wired into the `ip/` Makefile:
+
+```
+make check-vertex_shader   # one block
+make check                 # every block that has a file list
+```
+
+`make check` is the one that catches a change to `laatta_pkg` breaking a block
+you were not working on. It fails the build if any block fails.
+
 ## Adding a block
 
 Three things, by convention:
@@ -41,6 +57,10 @@ The shared testbench (`gpu_pkg.sv`, `axi_if.sv`, `submodules.sv`) and the UVM
 agents/env are reused for every block, so a new block only needs its RTL list,
 its top, and its test.
 
+Only the first of the three is needed for `scripts/sim.sh <block> rtl`, so a
+block can be checked from its very first line of RTL and gains its top and test
+once it is worth simulating.
+
 ## Example: `geometry_fetch`
 
 - `ip/sim/geometry_fetch.f` — `laatta_pkg.vhdl`, `common/cg.vhdl`,
@@ -52,4 +72,14 @@ its top, and its test.
 
 ```
 scripts/sim.sh geometry_fetch
+```
+
+## Example: `vertex_shader`
+
+RTL only so far — `ip/sim/vertex_shader.f` lists the package, the clock gate,
+the FloPoCo cores and fp wrappers, `dot_product` and the block itself. It has no
+top or test yet, so `rtl` is the action it supports:
+
+```
+make check-vertex_shader
 ```

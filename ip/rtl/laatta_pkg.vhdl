@@ -91,6 +91,9 @@ package laatta_pkg is
 
 
     type slv_array is array (natural range <>) of std_logic_vector(31 downto 0);
+    
+    subtype vec4_t is slv_array(0 to 3);
+    type mat4_t is array (0 to 3) of vec4_t;
 
 end package laatta_pkg;
 
