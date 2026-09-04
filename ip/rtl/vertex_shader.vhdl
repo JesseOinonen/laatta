@@ -15,7 +15,7 @@ entity vertex_shader is
         NUM_LANES : positive := 4 -- Dot motors in parallel, must be a power of 2
     );
     port ( clk_in       : in  std_logic;
-           rst          : in  std_logic;
+           rst_n        : in  std_logic;
            -- AXI stream input signals
            tdata_in     : in  std_logic_vector(C_AXIS_DATA_W-1 downto 0);
            tvalid_in    : in  std_logic;
